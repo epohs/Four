@@ -11,9 +11,15 @@
  * of 4-in-a-row.
  */
 
+import { DurableObject } from "cloudflare:workers";
+
 interface Env {
   GAME: DurableObjectNamespace;
+  NAMES: DurableObjectNamespace<NameRegistryDO>;
   ASSETS: Fetcher;
+  // Secret (never in the repo): the domain the site canonically lives on.
+  // When set, requests to the *.workers.dev host redirect there.
+  CANONICAL_HOST?: string;
 }
 
 const WS_PATH = /^\/g\/([A-Za-z0-9_-]+)\/ws$/;
@@ -21,6 +27,18 @@ const WS_PATH = /^\/g\/([A-Za-z0-9_-]+)\/ws$/;
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    // The workers.dev host is not canonical: permanent-redirect it to
+    // the real domain (requires run_worker_first so assets don't answer
+    // before we can).
+    if (env.CANONICAL_HOST && url.hostname.endsWith(".workers.dev")) {
+      const target = new URL(url);
+      target.protocol = "https:";
+      target.hostname = env.CANONICAL_HOST;
+      target.port = "";
+      return Response.redirect(target.toString(), 301);
+    }
+
     const match = url.pathname.match(WS_PATH);
 
     if (match) {
@@ -54,15 +72,29 @@ const EXPIRY_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 // Bounds the seat map and keeps the socket attachment under its 2KB limit.
 const MAX_PLAYER_ID = 64;
 
+// Longest game name, in characters after trimming. Uniqueness suffixes
+// ("Pomme 2") must also fit within this.
+const MAX_NAME = 16;
+
 // Log cap: a legitimate game never approaches this (~475 full rounds),
 // but it keeps a hostile client from growing the stored log until the
 // storage write fails. Past it, appends are rejected with "log_full".
 const MAX_LOG = 20000;
 
-export class GameDO implements DurableObject {
-  constructor(private state: DurableObjectState) {}
+export class GameDO {
+  constructor(
+    private state: DurableObjectState,
+    private env: Env,
+  ) {}
 
-  async fetch(_request: Request): Promise<Response> {
+  async fetch(request: Request): Promise<Response> {
+    // Remember our own code (a DO can't recover the name behind its id);
+    // the name registry keys claims by it.
+    const code = new URL(request.url).pathname.split("/")[2];
+    if (code && !(await this.state.storage.get("code"))) {
+      await this.state.storage.put("code", code);
+    }
+
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
 
@@ -111,6 +143,9 @@ export class GameDO implements DurableObject {
       case "resync":
         send(ws, { type: "log", log: await this.getLog() });
         break;
+      case "set_name":
+        await this.handleSetName(attachment, msg);
+        break;
       default:
         break; // unknown types are ignored — forward-compatibility rule
     }
@@ -128,7 +163,21 @@ export class GameDO implements DurableObject {
 
   /** Expiry: fire means 90 days of silence — delete the game. */
   async alarm(): Promise<void> {
+    // Retire the game's name so it becomes claimable again.
+    const code = await this.state.storage.get<string>("code");
+    if (code) {
+      try {
+        await this.registry().release(code);
+      } catch {
+        // registry unreachable: the name stays reserved — a nuisance,
+        // never worth blocking the deletion over
+      }
+    }
     await this.state.storage.deleteAll();
+  }
+
+  private registry(): DurableObjectStub<NameRegistryDO> {
+    return this.env.NAMES.get(this.env.NAMES.idFromName("global"));
   }
 
   private async handleHello(ws: WebSocket, playerId: string): Promise<void> {
@@ -150,6 +199,7 @@ export class GameDO implements DurableObject {
     send(ws, {
       type: "welcome",
       seat,
+      name: (await this.state.storage.get<string>("name")) ?? null,
       log: await this.getLog(),
       presence: this.presence(),
     });
@@ -190,6 +240,30 @@ export class GameDO implements DurableObject {
     this.broadcast({ type: "appended", index: log.length - 1, event });
   }
 
+  /**
+   * Rename the game. Creator-only (red is the first seat assigned) and
+   * silently ignored otherwise — the client never shows the edit
+   * affordance to anyone else, so a rejection has no one to inform.
+   *
+   * Names are globally unique: the registry may return a variant
+   * ("Pomme 2") of what was asked for, and the variant is what gets
+   * stored and broadcast, so the namer sees the collision happened.
+   */
+  private async handleSetName(attachment: Attachment, msg: any): Promise<void> {
+    if (attachment.seat !== "red") return;
+    if (typeof msg.name !== "string") return;
+    const wanted = msg.name.trim().slice(0, MAX_NAME).trimEnd();
+    if (!wanted) return;
+
+    const code = (await this.state.storage.get<string>("code")) ?? "";
+    if (!code) return;
+    const name = await this.registry().claim(wanted, code);
+
+    await this.state.storage.put("name", name);
+    await this.resetExpiry();
+    this.broadcast({ type: "name", name });
+  }
+
   private async getLog(): Promise<GameEvent[]> {
     return (await this.state.storage.get<GameEvent[]>("log")) ?? [];
   }
@@ -222,6 +296,56 @@ export class GameDO implements DurableObject {
         // a socket mid-close is not our problem; close events handle presence
       }
     }
+  }
+}
+
+/**
+ * NameRegistryDO — the single global registry of game names (one
+ * instance, id "global"). Uniqueness is case-insensitive; the display
+ * casing is whatever the claimer typed. Storage is two mirrored maps:
+ *   name:<lowercased name> → code    (who holds this name)
+ *   code:<code>            → lowercased name (what this game holds)
+ * Claims are called over RPC from GameDO, and the DO's single-threaded
+ * execution is what makes claim-then-store race-free.
+ */
+export class NameRegistryDO extends DurableObject {
+  /**
+   * Claim `base` (pre-trimmed, ≤ MAX_NAME chars) for game `code`,
+   * returning the name actually granted. On collision, numbered
+   * variants: "Pomme" → "Pomme 2", and when the suffix wouldn't fit,
+   * the base gives way — "Pomme's game Sun" → "Pomme's game Su2".
+   * Re-claiming a name the game already holds is a no-op; claiming a
+   * new one releases its old name.
+   */
+  async claim(base: string, code: string): Promise<string> {
+    const storage = this.ctx.storage;
+
+    let candidate = base;
+    for (let n = 2; ; n++) {
+      const owner = await storage.get<string>("name:" + candidate.toLowerCase());
+      if (!owner || owner === code) break;
+      const num = String(n);
+      candidate =
+        base.length + 1 + num.length <= MAX_NAME
+          ? base + " " + num
+          : base.slice(0, MAX_NAME - num.length).trimEnd() + num;
+    }
+
+    const previous = await storage.get<string>("code:" + code);
+    if (previous && previous !== candidate.toLowerCase()) {
+      await storage.delete("name:" + previous);
+    }
+    await storage.put("name:" + candidate.toLowerCase(), code);
+    await storage.put("code:" + code, candidate.toLowerCase());
+    return candidate;
+  }
+
+  /** Retire whatever name the game holds (expiry calls this). */
+  async release(code: string): Promise<void> {
+    const storage = this.ctx.storage;
+    const held = await storage.get<string>("code:" + code);
+    if (held) await storage.delete("name:" + held);
+    await storage.delete("code:" + code);
   }
 }
 

@@ -187,9 +187,15 @@ function main() {
       const link = el("a");
       link.href = "/g/" + game.code;
       const seatClass = game.seat === "red" || game.seat === "yellow" ? game.seat : "spectator";
+      link.append(el("span", "chip " + seatClass));
+      // A named game shows its name; unnamed ones fall back to the code.
+      if (typeof game.name === "string" && game.name) {
+        link.append(el("span", "recent-name", game.name));
+      } else {
+        link.append(el("code", "recent-name", game.code));
+      }
+      if (game.done === false) link.append(el("span", "badge", "in progress"));
       link.append(
-        el("span", "chip " + seatClass),
-        el("code", null, game.code),
         el("time", null, game.last ? new Date(game.last).toLocaleDateString() : ""),
       );
       item.append(link);
@@ -203,6 +209,7 @@ function main() {
     $("game").hidden = false;
 
     const boardEl = $("board");
+    const nameEl = $("game-name");
     const statusEl = $("status");
     const scoreEl = $("score");
     const shareBtn = $("share");
@@ -211,6 +218,7 @@ function main() {
     let ws = null;
     let connected = false;
     let seat = null; // "red" | "yellow" | "spectator" | null before welcome
+    let gameName = null; // server-stored name; the code stands in until set
     let log = [];
     let presence = { red: false, yellow: false };
     let pending = false; // an append is in flight; wait for its broadcast
@@ -254,11 +262,17 @@ function main() {
         case "welcome":
           connected = true;
           seat = msg.seat;
+          gameName = typeof msg.name === "string" ? msg.name : null;
           log = Array.isArray(msg.log) ? msg.log : [];
           presence = msg.presence;
           pending = false;
-          rememberRecent();
           render();
+          break;
+        case "name":
+          if (typeof msg.name === "string") {
+            gameName = msg.name;
+            render();
+          }
           break;
         case "appended":
           if (msg.index === log.length) {
@@ -288,12 +302,18 @@ function main() {
       }
     }
 
-    function rememberRecent() {
+    function rememberRecent(state) {
       const stored = store.get("four:recent", []);
       const recent = (Array.isArray(stored) ? stored : []).filter(
         (g) => g && g.code !== code,
       );
-      recent.unshift({ code, seat, last: Date.now() });
+      recent.unshift({
+        code,
+        seat,
+        name: gameName,
+        done: !!state.over, // current round finished — unfinished games get flagged
+        last: Date.now(),
+      });
       store.set("four:recent", recent.slice(0, 10));
     }
 
@@ -308,12 +328,58 @@ function main() {
 
     function render(animate) {
       const state = derive(log);
+      renderName();
       renderScore(state);
       renderStatus(state);
       renderBoard(state, animate);
       rematchBtn.hidden = !(
         state.over && connected && (seat === "red" || seat === "yellow")
       );
+      if (seat) rememberRecent(state); // keep the history entry current
+    }
+
+    /*
+     * The game name in the HUD. Everyone sees it (code until named);
+     * the creator (red) can click it to rename. While the input is
+     * open, renders leave it alone so a presence blip doesn't eat a
+     * half-typed name.
+     */
+    function renderName() {
+      if (nameEl.querySelector("input")) return;
+      nameEl.textContent = "";
+      const display = gameName || code;
+      if (connected && seat === "red") {
+        const btn = el("button", "name-edit", display);
+        btn.title = "Rename this game";
+        btn.addEventListener("click", editName);
+        nameEl.append(btn);
+      } else {
+        nameEl.append(el("span", null, display));
+      }
+    }
+
+    function editName() {
+      nameEl.textContent = "";
+      const input = el("input", "name-input");
+      input.value = gameName || "";
+      input.placeholder = code;
+      input.maxLength = 16;
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") input.blur();
+        if (e.key === "Escape") {
+          input.value = gameName || "";
+          input.blur();
+        }
+      });
+      input.addEventListener("blur", () => {
+        const name = input.value.trim();
+        if (name && name !== gameName) send({ type: "set_name", name });
+        nameEl.textContent = "";
+        renderName();
+      });
+      nameEl.append(input);
+      input.focus();
+      input.select();
     }
 
     function renderScore(state) {
@@ -430,5 +496,9 @@ function main() {
     });
 
     rematchBtn.addEventListener("click", () => tryAppend({ kind: "new_round" }));
+
+    $("leave").addEventListener("click", () => {
+      location.href = "/";
+    });
   }
 }

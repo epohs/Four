@@ -5,19 +5,26 @@
   "compatibility_date": "2026-08-28",
 
   // Static client. single-page-application makes any unmatched path
-  // (notably /g/<code>) serve index.html; run_worker_first hands the
-  // WebSocket endpoint to the Worker before assets can swallow it.
+  // (notably /g/<code>) serve index.html; run_worker_first: true routes
+  // everything through the Worker so it can canonical-redirect the
+  // workers.dev host and own the WebSocket endpoint before assets answer.
   "assets": {
     "directory": "public",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/g/*/ws"],
+    "run_worker_first": true,
     "binding": "ASSETS"
   },
 
   "durable_objects": {
-    "bindings": [{ "name": "GAME", "class_name": "GameDO" }]
+    "bindings": [
+      { "name": "GAME", "class_name": "GameDO" },
+      { "name": "NAMES", "class_name": "NameRegistryDO" }
+    ]
   },
 
-  // SQLite-backed class: required on the free plan.
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GameDO"] }]
+  // SQLite-backed classes: required on the free plan.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["GameDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["NameRegistryDO"] }
+  ]
 }

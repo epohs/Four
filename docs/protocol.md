@@ -51,6 +51,16 @@ The server stamps `seat` on move events from the seat of the sending socket; a c
 
 On success the server appends, stamps the seat on moves, resets the expiry alarm, and broadcasts `appended` to **all** sockets including the sender. The sender treats its own `appended` broadcast as confirmation; it must not apply the event optimistically before that.
 
+### set_name
+
+```jsonc
+{ "type": "set_name", "name": "Grudge match" }
+```
+
+Renames the game. Accepted only from the `red` seat (the creator — red is the first seat assigned). The server trims the name and caps it at 16 characters, then claims it in the global name registry (a singleton Durable Object, uniqueness compared case-insensitively). If the name is already held by another live game, the registry grants a numbered variant instead — `"Pomme"` → `"Pomme 2"`, and when the suffix wouldn't fit in 16 characters the base gives way: `"Pomme's game Sun"` → `"Pomme's game Su2"`. **The granted name — variant or not — is what gets stored and broadcast**, so the namer sees the collision and can rename again. Renaming releases the game's previous name; a game's name is also retired when the game expires (90 days of silence), making it claimable again.
+
+Anything invalid — wrong seat, non-string, empty after trimming — is ignored silently: the client shows the rename affordance only to red, so a rejection would have no one to inform.
+
 ## Server → client
 
 ### welcome (reply to hello)
@@ -59,6 +69,7 @@ On success the server appends, stamps the seat on moves, resets the expiry alarm
 {
   "type": "welcome",
   "seat": "red",                    // "red" | "yellow" | "spectator"
+  "name": "Grudge match",           // string | null (never named); ≤16 chars
   "log": [ { "kind": "move", "col": 3, "seat": "red" }, ... ],
   "presence": { "red": true, "yellow": false }
 }
@@ -81,6 +92,14 @@ If `index` is exactly the client's local log length, append and update. If it is
 ```
 
 `reason` is `"index_mismatch" | "spectator" | "malformed" | "log_full"`. On `index_mismatch` the client resyncs and then re-derives whether its intended action is still legal (usually it isn't — the opponent moved first). The other reasons need no special handling — the client just re-renders.
+
+### name (broadcast after a successful set_name)
+
+```jsonc
+{ "type": "name", "name": "Grudge match 2" }
+```
+
+Carries the name the registry actually granted, which may differ from what `set_name` asked for. The client replaces its local name. Clients that predate this message ignore it (forward-compatibility rule).
 
 ### presence (broadcast on connect/disconnect)
 
