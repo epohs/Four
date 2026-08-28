@@ -1,0 +1,66 @@
+# macOS
+__MACOSX/
+.DS_Store
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[codz]
+*$py.class
+
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+
+# Logs
+*.log
+
+
+# Test suite, kept to the working copy rather than tracked, along with the
+# caches and coverage output a run leaves behind. The relay is the only part
+# with a server to exercise; the client is driven from the browser.
+tests/
+conftest.py
+pytest.ini
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+
+
+# SQLite (the relay stores no game state; here so a stray copy is never committed)
+*.db
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.bak
+
+
+# Deployment config file
+config.json
+
+
+# Environments
+.env
+.envrc
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+
+#VSCode
+.vscode/
