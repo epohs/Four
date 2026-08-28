@@ -1,294 +1,45 @@
 # Four
 
-A minimal, real-time, two-player 4-in-a-row implementation using a client-first architecture. The system is designed to keep all game state in the browser while using a lightweight WebSocket relay for synchronization between players.
+A minimal, two-player 4-in-a-row game you play over a shared link — live or asynchronously.
 
-—
+Create a game, text the link to a friend, and take turns dropping pieces. Both of you at your screens? Moves appear instantly. One of you busy? Come back tonight; the game is exactly where you left it.
 
-# Core Concept
+## How it works, in one paragraph
 
-- Each game is identified by a unique token in the URL.
-- Two players join the same game via that token.
-- All game logic and state live in the browser.
-- The backend does not store any game data.
-- The backend only relays messages between connected clients.
+The client owns all game logic — move validation, win detection, score — and the server owns nothing but an append-only event log per game. Every device derives the entire game state by replaying that log. The server never learns the rules of the game; it enforces only that appends arrive in order and come from the seat that owns them. See [docs/architecture.md](docs/architecture.md) for the full model and [docs/protocol.md](docs/protocol.md) for the wire contract.
 
-—
+## Stack
 
-# Stack
+- **Frontend:** vanilla HTML, CSS, and JavaScript. No framework, no build step.
+- **Backend:** a Cloudflare Worker with one Durable Object class (TypeScript). Each game is one Durable Object holding one event log.
+- **Transport:** native WebSockets.
 
-## Frontend
-- HTML
-- CSS (Grid or Flexbox for board layout)
-- Vanilla JavaScript
+## Playing
 
-## Backend
-- Python
-- FastAPI (WebSocket endpoint only)
-- Uvicorn (ASGI server)
+- Visiting the bare domain shows a minimal landing page: start a new game, or reopen a recent one (remembered in your browser's localStorage).
+- A game lives at `/g/<code>`. The first browser to open a game gets the red seat, the second gets yellow, and anyone else watches as a spectator.
+- Either player can start a rematch once a round is won or drawn. Score accumulates across rounds for the life of the link.
+- Games expire 90 days after the last activity.
 
-## Communication
-- Native WebSockets (ws:// or wss://)
+## Local development
 
-## Storage
-- localStorage (primary)
-- IndexedDB (optional for extended history)
+```sh
+npm install
+npx wrangler dev
+```
 
-—
+Then open the printed local URL. Two browser windows on the same game code make a full match.
 
-# Architecture Overview
+## Deployment
 
-## Client Responsibilities
+```sh
+npx wrangler deploy
+```
 
-- Generate or read game token from URL
-- Establish WebSocket connection
-- Maintain full game state:
-  - Board
-  - Move history
-  - Turn tracking
-  - Score
-- Validate moves
-- Detect wins/draws
-- Persist state locally
-- Send and receive messages
+Route the Worker to your domain in the Cloudflare dashboard (or via `routes` in `wrangler.jsonc`). The client derives its WebSocket URL from `location`, so no domain is configured anywhere in the code.
 
-## Server Responsibilities
+## Docs
 
-- Accept WebSocket connections
-- Group clients by game token (room)
-- Relay messages between clients
-- Maintain no persistent state
-
-—
-
-# URL Token System
-
-Each game is identified via URL hash:
-
-#game=<uuid>
-
-## Behavior
-
-- If no token exists:
-  - Generate one via crypto.randomUUID()
-  - Update URL
-- If token exists:
-  - Join that game
-
-—
-
-# WebSocket Endpoint
-
-/ws/{game_id}
-
-## Connection Flow
-
-1. Client connects to /ws/{game_id}
-2. Server registers connection in rooms[game_id]
-3. Client begins sending/receiving messages
-
-—
-
-# Message Protocol
-
-All communication is JSON-based.
-
-## Move Event
-
-{
-  “type”: “move”,
-  “col”: <number>,
-  “player”: <string>,
-  “move”: <number>
-}
-
-## State Request
-
-{
-  “type”: “state_request”
-}
-
-## State Dump
-
-{
-  “type”: “state_dump”,
-  “moves”: [...]
-}
-
-## Reset Game
-
-{
-  “type”: “reset”
-}
-
-—
-
-# State Model (Client-Side)
-
-state = {
-  moves: [],
-  board: [...],
-  score: {
-    red: 0,
-    yellow: 0
-  }
-}
-
-## Principles
-
-- State is derived from moves
-- Board is rebuilt or incrementally updated
-- Score persists across matches
-- No server authority exists
-
-—
-
-# Game Logic
-
-## Turn Handling
-
-currentPlayer = moves.length % 2
-
-## Move Validation
-
-- Column not full
-- Game not already won
-- Correct player turn
-
-## Win Detection
-
-- Horizontal
-- Vertical
-- Diagonal (both directions)
-
-—
-
-# Synchronization Strategy
-
-## Primary Model
-
-Event-based synchronization:
-- Only moves are transmitted
-- Each client reconstructs state independently
-
-## Advantages
-
-- Minimal bandwidth
-- Deterministic state
-- Simple conflict model
-
-—
-
-# Reconnection Strategy
-
-On reconnect:
-
-1. Client sends:
-{ “type”: “state_request” }
-
-2. Peer responds:
-{ “type”: “state_dump”, “moves”: [...] }
-
-3. Client rebuilds state from moves
-
-—
-
-# Persistence
-
-## localStorage
-
-Store:
-- moves
-- score
-- game_id
-
-## Notes
-
-- Data is per browser/device
-- Clearing storage resets game
-- No cross-device persistence
-
-—
-
-# Backend Implementation Notes
-
-## FastAPI WebSocket Server
-
-- Maintain:
-rooms: dict[str, list[WebSocket]]
-
-- On connect:
-  - Add socket to room
-
-- On message:
-  - Broadcast to other clients in room
-
-- On disconnect:
-  - Remove socket
-
-## No Database
-
-- No persistence layer
-- No session storage
-- Stateless aside from active connections
-
-—
-
-# Deployment Requirements
-
-- Run with:
-uvicorn main:app
-
-- Use HTTPS in production:
-  - Required for wss://
-  - Required for mobile Safari reliability
-
-—
-
-# Constraints and Tradeoffs
-
-## No Authoritative State
-
-- Clients must agree on state
-- Desync is possible
-- Cheating is possible
-
-## No Persistent Multiplayer History
-
-- Game exists only while at least one client retains state
-- Both clients leaving can result in loss of state
-
-## Limited Scalability
-
-- Designed for 2 players per room
-- No matchmaking or lobby system
-
-## Reconnection Complexity
-
-- Requires explicit state sync logic
-
-—
-
-# Possible Extensions
-
-- Server-side validation (authoritative model)
-- Persistent storage (database)
-- Spectator mode
-- Matchmaking/lobbies
-- AI opponent
-- Game replay system
-
-—
-
-# Development Notes
-
-- Favor deterministic logic
-- Keep server minimal and stateless
-- Treat WebSocket messages as events, not state
-- Ensure idempotent move handling where possible
-- Design UI to tolerate delayed or out-of-order messages
-
-—
-
-# Summary
-
-Client owns logic and state. Server only relays messages. No persistence. No authority. Minimal backend.
+- [docs/architecture.md](docs/architecture.md) — the event-log model, seats, derivation rules, expiry
+- [docs/protocol.md](docs/protocol.md) — WebSocket message schemas and the append contract
+- [docs/design.md](docs/design.md) — layout, responsive targets, theming, animation
