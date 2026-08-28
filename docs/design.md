@@ -60,5 +60,5 @@ Nothing else moves.
 ## Miscellaneous
 
 - The page works with no opponent connected — it's an async game; the UI should feel complete, not "waiting", when playing alone against silence.
-- No external fonts or assets required; system font stack. Zero third-party requests.
+- Typeface: Nebula Sans, self-hosted in `public/fonts/` (SIL OFL, license bundled) with a system-font fallback stack. Zero third-party requests.
 - The domain appears nowhere in markup, script, or styles.

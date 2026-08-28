@@ -47,6 +47,11 @@ htmlcov/
 *.bak
 
 
+# Node / Wrangler
+node_modules/
+.wrangler/
+
+
 # Deployment config file
 config.json
 

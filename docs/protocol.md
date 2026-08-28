@@ -33,7 +33,7 @@ The server stamps `seat` on move events from the seat of the sending socket; a c
 { "type": "hello", "playerId": "<random id from localStorage>" }
 ```
 
-The server assigns a seat (first unknown id → `red`, second → `yellow`, otherwise `spectator`) and replies with `welcome`. Any other message before `hello` closes the connection.
+`playerId` must be a non-empty string of at most 64 characters (the client generates 16). The server assigns a seat (first unknown id → `red`, second → `yellow`, otherwise `spectator`) and replies with `welcome`. Any other message before `hello` — including an invalid `playerId` or an unparseable frame — closes the connection.
 
 ### append
 
@@ -47,6 +47,7 @@ The server assigns a seat (first unknown id → `red`, second → `yellow`, othe
 1. Sender has a seat (spectators cannot append) → else `rejected: "spectator"`.
 2. `index` equals log length → else `rejected: "index_mismatch"`.
 3. `event` is well-formed (`move` with integer `col` in 0–6, or `new_round`) → else `rejected: "malformed"`.
+4. The log is below its cap (20,000 events — unreachable in legitimate play; it only bounds abuse) → else `rejected: "log_full"`.
 
 On success the server appends, stamps the seat on moves, resets the expiry alarm, and broadcasts `appended` to **all** sockets including the sender. The sender treats its own `appended` broadcast as confirmation; it must not apply the event optimistically before that.
 
@@ -79,7 +80,7 @@ If `index` is exactly the client's local log length, append and update. If it is
 { "type": "rejected", "reason": "index_mismatch", "expectedIndex": 14 }
 ```
 
-`reason` is `"index_mismatch" | "spectator" | "malformed"`. On `index_mismatch` the client resyncs and then re-derives whether its intended action is still legal (usually it isn't — the opponent moved first).
+`reason` is `"index_mismatch" | "spectator" | "malformed" | "log_full"`. On `index_mismatch` the client resyncs and then re-derives whether its intended action is still legal (usually it isn't — the opponent moved first). The other reasons need no special handling — the client just re-renders.
 
 ### presence (broadcast on connect/disconnect)
 
