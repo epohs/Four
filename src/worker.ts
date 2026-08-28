@@ -85,7 +85,13 @@ export class GameDO {
   constructor(
     private state: DurableObjectState,
     private env: Env,
-  ) {}
+  ) {
+    // Heartbeat: clients send a raw "ping" text frame; the runtime answers
+    // "pong" itself, so a hibernated game is never woken by keepalives.
+    this.state.setWebSocketAutoResponse(
+      new WebSocketRequestResponsePair("ping", "pong"),
+    );
+  }
 
   async fetch(request: Request): Promise<Response> {
     // Remember our own code (a DO can't recover the name behind its id);
@@ -129,7 +135,7 @@ export class GameDO {
         msg.playerId !== "" &&
         msg.playerId.length <= MAX_PLAYER_ID
       ) {
-        await this.handleHello(ws, msg.playerId);
+        await this.handleHello(ws, msg);
       } else {
         ws.close(1008, "hello required");
       }
@@ -141,7 +147,7 @@ export class GameDO {
         await this.handleAppend(ws, attachment, msg);
         break;
       case "resync":
-        send(ws, { type: "log", log: await this.getLog() });
+        send(ws, { type: "log", ...(await this.logSlice(msg)) });
         break;
       case "set_name":
         await this.handleSetName(attachment, msg);
@@ -152,13 +158,22 @@ export class GameDO {
   }
 
   // The closing socket can still appear in getWebSockets() while these
-  // handlers run, so it is excluded from the presence computation.
+  // handlers run, so it is excluded from the presence computation. Only a
+  // seated socket's departure changes presence; spectator and pre-hello
+  // closes would broadcast a no-op frame to everyone.
   async webSocketClose(ws: WebSocket): Promise<void> {
-    this.broadcastPresence(ws);
+    this.presenceMayHaveChanged(ws);
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
-    this.broadcastPresence(ws);
+    this.presenceMayHaveChanged(ws);
+  }
+
+  private presenceMayHaveChanged(closing: WebSocket): void {
+    const a = closing.deserializeAttachment() as Attachment | null;
+    if (a && a.seat !== "spectator") {
+      this.broadcast({ type: "presence", ...this.presence(closing) });
+    }
   }
 
   /** Expiry: fire means 90 days of silence — delete the game. */
@@ -180,7 +195,8 @@ export class GameDO {
     return this.env.NAMES.get(this.env.NAMES.idFromName("global"));
   }
 
-  private async handleHello(ws: WebSocket, playerId: string): Promise<void> {
+  private async handleHello(ws: WebSocket, msg: any): Promise<void> {
+    const playerId: string = msg.playerId;
     const seats = (await this.state.storage.get<Record<string, Seat>>("seats")) ?? {};
 
     let seat = seats[playerId];
@@ -200,10 +216,45 @@ export class GameDO {
       type: "welcome",
       seat,
       name: (await this.state.storage.get<string>("name")) ?? null,
-      log: await this.getLog(),
+      ...(await this.logSlice(msg)),
       presence: this.presence(),
     });
-    this.broadcastPresence();
+    // The joiner already has presence from welcome; tell everyone else.
+    this.broadcast({ type: "presence", ...this.presence() }, ws);
+  }
+
+  /**
+   * Delta sync: a client that claims `have` events from epoch `epoch`
+   * gets only the suffix past what it holds (`from` marks the join
+   * point). Anything off — unknown epoch (the log was reset by expiry),
+   * a claim past the log's end, or an old client sending neither field —
+   * falls back to the full log with from: 0.
+   */
+  private async logSlice(msg: any): Promise<{ epoch: string; from: number; log: GameEvent[] }> {
+    const log = await this.getLog();
+    const epoch = await this.getEpoch();
+    const from =
+      msg.epoch === epoch &&
+      Number.isInteger(msg.have) &&
+      msg.have >= 0 &&
+      msg.have <= log.length
+        ? msg.have
+        : 0;
+    return { epoch, from, log: from > 0 ? log.slice(from) : log };
+  }
+
+  /**
+   * The log's generation marker. Expiry's deleteAll wipes it, so a
+   * reborn game mints a fresh epoch and stale clients full-sync instead
+   * of mistaking an empty slice for "already caught up".
+   */
+  private async getEpoch(): Promise<string> {
+    let epoch = await this.state.storage.get<string>("epoch");
+    if (!epoch) {
+      epoch = crypto.randomUUID();
+      await this.state.storage.put("epoch", epoch);
+    }
+    return epoch;
   }
 
   private async handleAppend(ws: WebSocket, attachment: Attachment, msg: any): Promise<void> {
@@ -283,13 +334,10 @@ export class GameDO {
     return present;
   }
 
-  private broadcastPresence(except?: WebSocket): void {
-    this.broadcast({ type: "presence", ...this.presence(except) });
-  }
-
-  private broadcast(msg: unknown): void {
+  private broadcast(msg: unknown, skip?: WebSocket): void {
     const frame = JSON.stringify(msg);
     for (const socket of this.state.getWebSockets()) {
+      if (socket === skip) continue;
       try {
         socket.send(frame);
       } catch {

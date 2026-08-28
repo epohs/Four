@@ -2,7 +2,7 @@
 
 The contract between the vanilla-JS client and the TypeScript Durable Object. This document is the source of truth for the boundary (there are no shared type definitions), so implementation on either side follows it exactly.
 
-All messages are JSON text frames.
+All messages are JSON text frames, with one exception: the heartbeat frames `ping` and `pong` are raw text, not JSON (see Heartbeat below).
 
 ## Connection
 
@@ -13,6 +13,16 @@ wss://<host>/g/<code>/ws
 ```
 
 The URL is derived from `location` at runtime — the host is never configured or hardcoded.
+
+## Heartbeat
+
+TCP dies silently on bad networks: a socket can look open while frames go nowhere. The client sends the raw text frame `ping` during quiet stretches (every ~20s); the server answers `pong` via the Durable Object's auto-response facility, which replies without waking a hibernated game. If nothing at all arrives for ~45s, the client closes the socket and reconnects with backoff. Reconnects also fire immediately on the browser's `online` event and when a hidden tab becomes visible again.
+
+`ping` never reaches the message handler (auto-response intercepts it), so it is exempt from the "junk before hello closes the connection" rule.
+
+## Log epoch
+
+Every game log carries an **epoch** — an opaque string minted when the game first stores anything and wiped with everything else at expiry. It exists so delta sync (below) can tell "you're caught up" apart from "the log you knew was deleted": a client claiming events from a stale epoch always receives the full log.
 
 ## Events (the stored things)
 
@@ -30,10 +40,12 @@ The server stamps `seat` on move events from the seat of the sending socket; a c
 ### hello (required first message)
 
 ```jsonc
-{ "type": "hello", "playerId": "<random id from localStorage>" }
+{ "type": "hello", "playerId": "<random id from localStorage>", "have": 12, "epoch": "<epoch from a previous welcome>" }
 ```
 
 `playerId` must be a non-empty string of at most 64 characters (the client generates 16). The server assigns a seat (first unknown id → `red`, second → `yellow`, otherwise `spectator`) and replies with `welcome`. Any other message before `hello` — including an invalid `playerId` or an unparseable frame — closes the connection.
+
+`have` and `epoch` are optional and drive delta sync: a reconnecting client claims it already holds `have` events from log generation `epoch`, and the `welcome` then carries only the suffix past that point. Absent, invalid, or stale claims (unknown epoch, `have` beyond the log's end) fall back to the full log — so a first-time client simply omits them.
 
 ### append
 
@@ -70,12 +82,14 @@ Anything invalid — wrong seat, non-string, empty after trimming — is ignored
   "type": "welcome",
   "seat": "red",                    // "red" | "yellow" | "spectator"
   "name": "Grudge match",           // string | null (never named); ≤16 chars
+  "epoch": "<log generation id>",
+  "from": 12,                       // index the log slice starts at
   "log": [ { "kind": "move", "col": 3, "seat": "red" }, ... ],
   "presence": { "red": true, "yellow": false }
 }
 ```
 
-The client replaces any local state for this game by replaying `log`.
+`log` holds the events from index `from` onward. When `from` is `0` the client replaces its local log wholesale; when `from > 0` (the delta case — it equals the `have` the client sent) the client keeps its first `from` events and appends the slice. The client stores `epoch` and echoes it in later `hello`/`resync` messages.
 
 ### appended (broadcast)
 
@@ -91,7 +105,7 @@ If `index` is exactly the client's local log length, append and update. If it is
 { "type": "rejected", "reason": "index_mismatch", "expectedIndex": 14 }
 ```
 
-`reason` is `"index_mismatch" | "spectator" | "malformed" | "log_full"`. On `index_mismatch` the client resyncs and then re-derives whether its intended action is still legal (usually it isn't — the opponent moved first). The other reasons need no special handling — the client just re-renders.
+`reason` is `"index_mismatch" | "spectator" | "malformed" | "log_full"`. On `index_mismatch` the client resyncs **only if `expectedIndex` differs from its local log length** — when the winning append's own broadcast already caught it up (the common race), a refetch would be wasted bytes — and then re-derives whether its intended action is still legal (usually it isn't — the opponent moved first). The other reasons need no special handling — the client just re-renders.
 
 ### name (broadcast after a successful set_name)
 
@@ -107,18 +121,18 @@ Carries the name the registry actually granted, which may differ from what `set_
 { "type": "presence", "red": true, "yellow": false }
 ```
 
-A seat is `true` while at least one socket holding it is connected. Never stored.
+A seat is `true` while at least one socket holding it is connected. Never stored. Broadcast after every `hello` (to everyone but the joiner, whose `welcome` already carries it) and when a **seated** socket closes — a spectator or pre-hello socket leaving changes nothing, so nothing is sent.
 
 ### resync request and reply
 
 ```jsonc
 // client → server
-{ "type": "resync" }
+{ "type": "resync", "have": 12, "epoch": "<epoch from welcome>" }
 // server → client
-{ "type": "log", "log": [ ... ] }
+{ "type": "log", "epoch": "<log generation id>", "from": 12, "log": [ ... ] }
 ```
 
-Full-log replacement; with logs this small, delta sync isn't worth the code.
+`have`/`epoch` and `from` work exactly as in `hello`/`welcome`: a valid claim gets just the suffix, anything else gets the full log with `from: 0`. The client keeps at most one resync in flight (a second request while one is pending would only duplicate the reply).
 
 ## Ordering guarantees
 

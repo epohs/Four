@@ -46,14 +46,24 @@ Rules for deriving state from the log (all client-side):
 - Within a round, seats alternate. **Red starts round 1; the starting seat alternates each round** (yellow starts round 2, and so on), regardless of who won.
 - A round ends when a client detects four-in-a-row (horizontal, vertical, or either diagonal) or a full board (draw).
 - Score is the count of rounds each seat has won across the whole log. Draws score nothing. There is no other score storage anywhere.
-- The client only *offers* moves that are legal (your turn, column not full, round not over) and only offers rematch once the round is over — but these are client rules. The server accepts any structurally valid append. Between friends, a corrupt log is a shrug, and starting a new link is the remedy.
+- The client only *offers* moves that are legal (your turn, column not full, round not over) and only offers rematch once the round is over — but these are client rules. The server accepts any structurally valid append.
+- Derivation is where the rules live, so it is also where impossible history gets filtered: replay **shrugs off** any event the rules can't produce — a move into a full column, a move after the round ended, a move out of turn, and a `new_round` before the round is over. A hostile or buggy client can pollute the log with such events, but every honest client derives the same clean game past them.
 
 ## Synchronization
 
-- On connect, the Durable Object sends the full log plus your seat. The client rebuilds state and renders.
+- On connect, the Durable Object sends your seat plus the log — in full for a first join, or just the suffix past what the client already holds (delta sync, guarded by a per-log **epoch** so a client from an expired game's previous life can't mistake an empty delta for "caught up"). See [protocol.md](protocol.md).
 - Live moves broadcast to all connected sockets in the game; each client appends to its local copy and updates incrementally.
 - If your opponent is offline, your move still lands in the log — they replay it whenever they return. This is what makes asynchronous play work.
 - The append-index contract means a client that has fallen behind gets its append rejected with the expected index; it re-syncs and retries. See [protocol.md](protocol.md).
+
+## Surviving bad connections
+
+The design assumes phones on flaky networks:
+
+- **Heartbeat:** the client pings over quiet stretches; the Durable Object's auto-response answers without waking a hibernated game. A long silence means the socket is dead even though it looks open — the client closes it and reconnects. Without this, a silently dropped TCP connection would show a live board that never updates.
+- **Reconnect:** exponential backoff with jitter, short-circuited the moment the browser fires `online` or a backgrounded tab becomes visible again. A connection attempt stuck in `CONNECTING` is abandoned after 10s.
+- **In-flight appends:** an append whose confirmation never arrives triggers a resync after a few seconds rather than leaving the board frozen.
+- **Bandwidth:** reconnects fetch only the log suffix (delta sync above); static assets carry cache headers so fonts and icons are never re-downloaded, and HTML/JS/CSS revalidate as cheap 304s.
 
 ## Presence
 
@@ -66,6 +76,6 @@ Connect and disconnect broadcast an ephemeral presence message so the UI can sho
 
 ## Accepted tradeoffs
 
-- A hostile or buggy client can append legal-looking-but-wrong events; the other client's derivation will simply reflect them. No server-side rule enforcement, by design.
+- No server-side rule enforcement, by design. A hostile client can still bloat the log with impossible events (up to the abuse cap), but honest clients filter them out during derivation, so the worst it achieves is wasted bytes.
 - No cross-browser identity: your seat is tied to one browser's localStorage. Clearing site data forfeits the seat (the game itself survives on the server).
 - Two players and spectators only; no lobbies, no discovery.

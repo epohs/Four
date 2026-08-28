@@ -43,7 +43,9 @@ function otherSeat(seat) {
  * starting seat alternates each round regardless of who won. Score is
  * rounds won across the whole log; draws score nothing. Structurally
  * valid but impossible events (full column, move after the round
- * ended) are shrugged off, per the architecture doc.
+ * ended, a move out of turn, new_round before the round is over) are
+ * shrugged off, per the architecture doc — derivation is where the
+ * rules live, so it is also where impossible history gets filtered.
  */
 function derive(log) {
   const score = { red: 0, yellow: 0 };
@@ -55,6 +57,7 @@ function derive(log) {
 
   for (const ev of log) {
     if (ev.kind === "new_round") {
+      if (!over) continue; // a live (or unstarted) round can't be restarted
       round++;
       board = emptyBoard();
       over = null;
@@ -63,8 +66,12 @@ function derive(log) {
       continue;
     }
     if (ev.kind !== "move" || (ev.seat !== "red" && ev.seat !== "yellow")) continue;
+    if (!Number.isInteger(ev.col) || ev.col < 0 || ev.col > 6) continue;
+    if (over) continue;
+    const starter = round % 2 === 1 ? "red" : "yellow";
+    if (ev.seat !== (moves % 2 === 0 ? starter : otherSeat(starter))) continue;
     const row = dropRow(board, ev.col);
-    if (over || row < 0) continue;
+    if (row < 0) continue;
     board[row][ev.col] = ev.seat;
     moves++;
     lastMove = { row, col: ev.col, seat: ev.seat };
@@ -196,7 +203,11 @@ function main() {
       }
       if (game.done === false) link.append(el("span", "badge", "in progress"));
       link.append(
-        el("time", null, game.last ? new Date(game.last).toLocaleDateString() : ""),
+        el(
+          "time",
+          null,
+          Number.isFinite(game.last) ? new Date(game.last).toLocaleDateString() : "",
+        ),
       );
       item.append(link);
       list.append(item);
@@ -219,22 +230,38 @@ function main() {
     let connected = false;
     let seat = null; // "red" | "yellow" | "spectator" | null before welcome
     let gameName = null; // server-stored name; the code stands in until set
+    let queuedName = null; // rename typed while offline; sent on next welcome
     let log = [];
+    let epoch = null; // log generation from the server; guards delta sync
     let presence = { red: false, yellow: false };
     let pending = false; // an append is in flight; wait for its broadcast
+    let pendingStamp = 0;
+    let resyncing = false; // a resync is in flight; don't ask again
     let backoff = 1000;
+    let reconnectTimer = null;
+    let lastAlive = Date.now(); // last time any frame arrived on the socket
 
     connect();
     render();
 
     function connect() {
       const scheme = location.protocol === "https:" ? "wss://" : "ws://";
-      ws = new WebSocket(scheme + location.host + "/g/" + code + "/ws");
-      ws.addEventListener("open", () => {
+      const socket = new WebSocket(scheme + location.host + "/g/" + code + "/ws");
+      ws = socket;
+      // A bad network can leave a socket stuck CONNECTING for a long
+      // time; give up so the close handler schedules the retry.
+      const connectTimeout = setTimeout(() => {
+        if (socket.readyState === WebSocket.CONNECTING) socket.close();
+      }, 10000);
+      socket.addEventListener("open", () => {
+        clearTimeout(connectTimeout);
         backoff = 1000;
-        send({ type: "hello", playerId: playerId() });
+        lastAlive = Date.now();
+        send({ type: "hello", playerId: playerId(), have: log.length, epoch });
       });
-      ws.addEventListener("message", (e) => {
+      socket.addEventListener("message", (e) => {
+        lastAlive = Date.now();
+        if (e.data === "pong") return; // heartbeat reply, not JSON
         let msg;
         try {
           msg = JSON.parse(e.data);
@@ -243,18 +270,75 @@ function main() {
         }
         handle(msg);
       });
-      ws.addEventListener("close", () => {
+      socket.addEventListener("close", () => {
+        clearTimeout(connectTimeout);
+        if (ws !== socket) return; // superseded by a newer connection
         connected = false;
         pending = false;
+        resyncing = false;
         presence = { red: false, yellow: false };
         render();
-        setTimeout(connect, backoff);
+        reconnectTimer = setTimeout(connect, backoff * (0.5 + Math.random()));
         backoff = Math.min(backoff * 2, 30000);
       });
     }
 
+    /*
+     * Heartbeat. TCP dies silently on flaky networks: the socket looks
+     * OPEN while frames go nowhere. Ping over quiet stretches; a long
+     * silence means the connection is dead — close it so the normal
+     * reconnect path takes over. The server answers pings without
+     * waking (auto-response), so idle games still cost nothing.
+     */
+    setInterval(() => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - lastAlive > 45000) ws.close();
+      else ws.send("ping");
+    }, 20000);
+
+    // The instant the network returns or the tab wakes, don't sit out
+    // the backoff timer — and probe a socket that may have died while
+    // the tab was suspended.
+    function reconnectNow() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        // Grace so a stale timestamp from a suspended tab doesn't kill
+        // a live socket before its pong lands.
+        lastAlive = Math.max(lastAlive, Date.now() - 25000);
+        ws.send("ping");
+        return;
+      }
+      if (ws && ws.readyState === WebSocket.CONNECTING) return; // attempt underway
+      clearTimeout(reconnectTimer);
+      backoff = 1000;
+      connect();
+    }
+    addEventListener("online", reconnectNow);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) reconnectNow();
+    });
+
     function send(msg) {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+    }
+
+    function requestResync() {
+      if (resyncing) return;
+      resyncing = true;
+      send({ type: "resync", have: log.length, epoch });
+    }
+
+    /*
+     * Apply a welcome/log payload. Delta sync: the server sends only
+     * the events past what our hello/resync claimed to have (`from` is
+     * the join point); from: 0 — epoch mismatch, old server, or a log
+     * reset by expiry — replaces wholesale.
+     */
+    function applyLog(msg) {
+      const events = Array.isArray(msg.log) ? msg.log : [];
+      const from = Number.isInteger(msg.from) ? msg.from : 0;
+      if (typeof msg.epoch === "string") epoch = msg.epoch;
+      if (from > 0 && from <= log.length) log = log.slice(0, from).concat(events);
+      else log = events;
     }
 
     function handle(msg) {
@@ -263,14 +347,21 @@ function main() {
           connected = true;
           seat = msg.seat;
           gameName = typeof msg.name === "string" ? msg.name : null;
-          log = Array.isArray(msg.log) ? msg.log : [];
-          presence = msg.presence;
+          applyLog(msg);
+          presence = { red: !!(msg.presence && msg.presence.red), yellow: !!(msg.presence && msg.presence.yellow) };
           pending = false;
+          resyncing = false;
+          if (queuedName) {
+            send({ type: "set_name", name: queuedName });
+            queuedName = null;
+          }
+          rememberRecent();
           render();
           break;
         case "name":
           if (typeof msg.name === "string") {
             gameName = msg.name;
+            rememberRecent();
             render();
           }
           break;
@@ -278,20 +369,28 @@ function main() {
           if (msg.index === log.length) {
             log.push(msg.event);
             pending = false;
+            rememberRecent();
             render(true); // animate just this event
           } else if (msg.index > log.length) {
-            send({ type: "resync" }); // we missed events
+            requestResync(); // we missed events
           } // behind: duplicate, ignore
           break;
         case "log":
-          log = Array.isArray(msg.log) ? msg.log : [];
+          applyLog(msg);
           pending = false;
+          resyncing = false;
+          rememberRecent();
           render();
           break;
         case "rejected":
           pending = false;
-          if (msg.reason === "index_mismatch") send({ type: "resync" });
-          else render();
+          // Resync only if actually behind — when the winning append's
+          // broadcast already caught us up, a refetch is wasted bytes.
+          if (msg.reason === "index_mismatch" && msg.expectedIndex !== log.length) {
+            requestResync();
+          } else {
+            render();
+          }
           break;
         case "presence":
           presence = { red: !!msg.red, yellow: !!msg.yellow };
@@ -302,7 +401,12 @@ function main() {
       }
     }
 
-    function rememberRecent(state) {
+    // Called from the handlers that change what's worth remembering
+    // (welcome/appended/log/name), not from render — a presence blip
+    // shouldn't cost a localStorage write.
+    function rememberRecent() {
+      if (!seat) return;
+      const state = derive(log);
       const stored = store.get("four:recent", []);
       const recent = (Array.isArray(stored) ? stored : []).filter(
         (g) => g && g.code !== code,
@@ -321,6 +425,12 @@ function main() {
       if (pending || !connected) return;
       pending = true;
       send({ type: "append", index: log.length, event });
+      // If neither the broadcast nor a rejection ever lands, don't stay
+      // frozen — ask for the log; its reply clears `pending` either way.
+      const stamp = ++pendingStamp;
+      setTimeout(() => {
+        if (pending && pendingStamp === stamp) requestResync();
+      }, 8000);
       render(); // drop ghost/cursor affordances while in flight
     }
 
@@ -335,7 +445,6 @@ function main() {
       rematchBtn.hidden = !(
         state.over && connected && (seat === "red" || seat === "yellow")
       );
-      if (seat) rememberRecent(state); // keep the history entry current
     }
 
     /*
@@ -373,7 +482,15 @@ function main() {
       });
       input.addEventListener("blur", () => {
         const name = input.value.trim();
-        if (name && name !== gameName) send({ type: "set_name", name });
+        if (name && name !== gameName) {
+          // The socket can die while the input is open; a rename typed
+          // offline is queued and sent on the next welcome.
+          if (connected && ws && ws.readyState === WebSocket.OPEN) {
+            send({ type: "set_name", name });
+          } else {
+            queuedName = name;
+          }
+        }
         nameEl.textContent = "";
         renderName();
       });
