@@ -61,7 +61,7 @@ Rules for deriving state from the log (all client-side):
 The design assumes phones on flaky networks:
 
 - **Heartbeat:** the client pings over quiet stretches; the Durable Object's auto-response answers without waking a hibernated game. A long silence means the socket is dead even though it looks open — the client closes it and reconnects. Without this, a silently dropped TCP connection would show a live board that never updates.
-- **Reconnect:** exponential backoff with jitter, short-circuited the moment the browser fires `online` or a backgrounded tab becomes visible again. A connection attempt stuck in `CONNECTING` is abandoned after 10s.
+- **Reconnect:** exponential backoff with jitter, capped low (~10s) because an attempt is one cheap request and iOS doesn't reliably fire wake events. Short-circuited by every wake signal the browser offers — `online`, `focus`, `pageshow`, a tab becoming visible — and by tapping the board while disconnected. A connection attempt stuck in `CONNECTING` is abandoned after 10s.
 - **In-flight appends:** an append whose confirmation never arrives triggers a resync after a few seconds rather than leaving the board frozen.
 - **Bandwidth:** reconnects fetch only the log suffix (delta sync above); static assets carry cache headers so fonts and icons are never re-downloaded, and HTML/JS/CSS revalidate as cheap 304s.
 

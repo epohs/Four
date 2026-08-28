@@ -279,7 +279,9 @@ function main() {
         presence = { red: false, yellow: false };
         render();
         reconnectTimer = setTimeout(connect, backoff * (0.5 + Math.random()));
-        backoff = Math.min(backoff * 2, 30000);
+        // Low cap: an attempt is one cheap request, and iOS doesn't
+        // reliably fire `online` — the timer is the recovery path there.
+        backoff = Math.min(backoff * 2, 10000);
       });
     }
 
@@ -307,12 +309,20 @@ function main() {
         ws.send("ping");
         return;
       }
-      if (ws && ws.readyState === WebSocket.CONNECTING) return; // attempt underway
+      if (ws && ws.readyState === WebSocket.CONNECTING) {
+        backoff = 1000; // attempt underway; if it's a stale one, retry fast
+        return;
+      }
       clearTimeout(reconnectTimer);
       backoff = 1000;
       connect();
     }
+    // Belt and suspenders: iOS fires these inconsistently (Control
+    // Center doesn't even hide the page), so hook every wake signal —
+    // reconnectNow is idempotent, duplicates are harmless.
     addEventListener("online", reconnectNow);
+    addEventListener("focus", reconnectNow);
+    addEventListener("pageshow", reconnectNow);
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) reconnectNow();
     });
@@ -613,6 +623,12 @@ function main() {
     });
 
     rematchBtn.addEventListener("click", () => tryAppend({ kind: "new_round" }));
+
+    // A tap on the board while disconnected is a fine reason to retry
+    // right now instead of waiting out the backoff timer.
+    boardEl.addEventListener("click", () => {
+      if (!connected) reconnectNow();
+    });
 
     $("leave").addEventListener("click", () => {
       location.href = "/";
