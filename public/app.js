@@ -250,6 +250,9 @@ function main() {
     }
 
     function connectLanding(entry) {
+      // Same rule as the game page: a hidden tab needs no sockets; the
+      // visibilitychange handler reconnects when it becomes visible.
+      if (document.hidden) return;
       const scheme = location.protocol === "https:" ? "wss://" : "ws://";
       const socket = new WebSocket(scheme + location.host + "/g/" + entry.code + "/ws");
       entry.socket = socket;
@@ -327,7 +330,15 @@ function main() {
         // Don't resurrect games the user removed from the list.
         if (live.has(entry.code)) {
           setTimeout(() => {
-            if (live.has(entry.code)) connectLanding(entry);
+            // Never stack a second socket onto a live one: the retry
+            // only fires after this socket closed, but the visibility
+            // handler may have already reconnected in the meantime.
+            if (
+              live.has(entry.code) &&
+              (!entry.socket || entry.socket.readyState === WebSocket.CLOSED)
+            ) {
+              connectLanding(entry);
+            }
           }, 5000);
         }
       });
@@ -342,6 +353,21 @@ function main() {
         else entry.socket.send("ping");
       }
     }, 20000);
+
+    // A hidden tab's turn-rings are invisible, so its sockets are not
+    // needed: close them, and reconnect everything on return. Mirrors
+    // the game page's presence rule.
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        for (const entry of live.values()) {
+          if (entry.socket && entry.socket.readyState <= WebSocket.OPEN) entry.socket.close();
+        }
+        return;
+      }
+      for (const entry of live.values()) {
+        if (!entry.socket || entry.socket.readyState === WebSocket.CLOSED) connectLanding(entry);
+      }
+    });
 
     for (const entry of live.values()) connectLanding(entry);
 
@@ -489,7 +515,9 @@ function main() {
       // player isn't at the game: close the socket so the server marks
       // them away, exactly like clicking Leave. Returning reconnects.
       if (document.hidden) {
-        if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+        // Close a still-CONNECTING socket too; the 10s connect timeout
+        // would get it eventually, but there's no need to wait.
+        if (ws && ws.readyState <= WebSocket.OPEN) ws.close();
         return;
       }
       reconnectNow();

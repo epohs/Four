@@ -84,6 +84,12 @@ const MAX_NAME = 16;
 // storage write fails. Past it, appends are rejected with "log_full".
 const MAX_LOG = 20000;
 
+// Socket cap: a legitimate game never has more than a handful of
+// sockets (two players across a few tabs, a couple of spectators, the
+// landing page's turn-rings). Past this we evict or refuse, so a
+// hostile client can't pile up connections against a game.
+const MAX_SOCKETS = 64;
+
 export class GameDO {
   constructor(
     private state: DurableObjectState,
@@ -110,6 +116,17 @@ export class GameDO {
     // Hibernation API: the runtime holds the socket and wakes us per
     // message, so idle games cost nothing. No attachment until hello.
     this.state.acceptWebSocket(server);
+
+    // Keep the socket set bounded: past the cap, evict a socket that
+    // hasn't sent hello yet (the cheapest to lose); if there is none,
+    // refuse the newcomer. Its close handler broadcasts nothing — a
+    // hello-less socket holds no seat.
+    const sockets = this.state.getWebSockets();
+    if (sockets.length > MAX_SOCKETS) {
+      const idle = sockets.find((s) => s !== server && s.deserializeAttachment() === null);
+      if (idle) idle.close(1013, "too many connections");
+      else server.close(1013, "too many connections");
+    }
 
     return new Response(null, { status: 101, webSocket: client });
   }

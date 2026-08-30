@@ -14,6 +14,8 @@ wss://<host>/g/<code>/ws
 
 The URL is derived from `location` at runtime — the host is never configured or hardcoded.
 
+The server bounds the socket set per game (64): past the cap it refuses new connections, evicting a hello-less socket first if one exists. Legitimate play never approaches this.
+
 ## Heartbeat
 
 TCP dies silently on bad networks: a socket can look open while frames go nowhere. The client sends the raw text frame `ping` during quiet stretches (every ~20s); the server answers `pong` via the Durable Object's auto-response facility, which replies without waking a hibernated game. If nothing at all arrives for ~45s, the client closes the socket and reconnects with backoff. Reconnects also fire immediately on the browser's `online` event and when a hidden tab becomes visible again.
