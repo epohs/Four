@@ -40,10 +40,12 @@ The server stamps `seat` on move events from the seat of the sending socket; a c
 ### hello (required first message)
 
 ```jsonc
-{ "type": "hello", "playerId": "<random id from localStorage>", "have": 12, "epoch": "<epoch from a previous welcome>" }
+{ "type": "hello", "playerId": "<random id from localStorage>", "have": 12, "epoch": "<epoch from a previous welcome>", "context": "game" }
 ```
 
 `playerId` must be a non-empty string of at most 64 characters (the client generates 16). The server assigns a seat (first unknown id → `red`, second → `yellow`, otherwise `spectator`) and replies with `welcome`. Any other message before `hello` — including an invalid `playerId` or an unparseable frame — closes the connection.
+
+`context` is optional: `"game"` (the game page — the default) or `"landing"` (the landing page's turn-ring sockets). Landing sockets receive the log and drive the turn ring, but never count toward presence — presence means being on the game screen, so leaving a game makes you away from it.
 
 `have` and `epoch` are optional and drive delta sync: a reconnecting client claims it already holds `have` events from log generation `epoch`, and the `welcome` then carries only the suffix past that point. Absent, invalid, or stale claims (unknown epoch, `have` beyond the log's end) fall back to the full log — so a first-time client simply omits them.
 
@@ -121,7 +123,7 @@ Carries the name the registry actually granted, which may differ from what `set_
 { "type": "presence", "red": true, "yellow": false }
 ```
 
-A seat is `true` while at least one socket holding it is connected. Never stored. Broadcast after every `hello` (to everyone but the joiner, whose `welcome` already carries it) and when a **seated** socket closes — a spectator or pre-hello socket leaving changes nothing, so nothing is sent.
+A seat is `true` while at least one **game-page** socket holding it is connected — landing-page turn-ring sockets (`hello` `context: "landing"`) never count. Clients also close their socket while the tab is hidden, so presence means the player is actually looking at the game; returning to the tab reconnects and re-marks them present. Never stored. Broadcast after every `hello` (to everyone but the joiner, whose `welcome` already carries it) and when a **seated** game socket closes — a spectator, pre-hello, or landing socket leaving changes nothing, so nothing is sent.
 
 ### resync request and reply
 

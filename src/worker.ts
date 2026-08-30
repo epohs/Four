@@ -64,6 +64,9 @@ type GameEvent =
 interface Attachment {
   playerId: string;
   seat: Seat;
+  /** Where the socket lives: the game page counts for presence; the
+      landing page's turn-ring sockets do not. */
+  context: "game" | "landing";
 }
 
 const EXPIRY_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
@@ -171,7 +174,7 @@ export class GameDO {
 
   private presenceMayHaveChanged(closing: WebSocket): void {
     const a = closing.deserializeAttachment() as Attachment | null;
-    if (a && a.seat !== "spectator") {
+    if (a && a.seat !== "spectator" && a.context !== "landing") {
       this.broadcast({ type: "presence", ...this.presence(closing) });
     }
   }
@@ -209,7 +212,11 @@ export class GameDO {
       }
     }
 
-    ws.serializeAttachment({ playerId, seat } satisfies Attachment);
+    ws.serializeAttachment({
+      playerId,
+      seat,
+      context: msg.context === "landing" ? "landing" : "game",
+    } satisfies Attachment);
     await this.resetExpiry();
 
     send(ws, {
@@ -323,13 +330,17 @@ export class GameDO {
     await this.state.storage.setAlarm(Date.now() + EXPIRY_MS);
   }
 
-  /** A seat is present while at least one socket holding it is connected. */
+  /** A seat is present while at least one game-page socket holds it.
+      Landing-page turn-ring sockets (context "landing") never count —
+      presence means being on the game screen. */
   private presence(except?: WebSocket): { red: boolean; yellow: boolean } {
     const present = { red: false, yellow: false };
     for (const socket of this.state.getWebSockets()) {
       if (socket === except) continue;
       const a = socket.deserializeAttachment() as Attachment | null;
-      if (a && (a.seat === "red" || a.seat === "yellow")) present[a.seat] = true;
+      if (a && (a.seat === "red" || a.seat === "yellow") && a.context !== "landing") {
+        present[a.seat] = true;
+      }
     }
     return present;
   }

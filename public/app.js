@@ -228,6 +228,8 @@ function main() {
       list.append(item);
 
       // Live turn-ring: only in-progress player games are worth a socket.
+      // These hello with context "landing", so they drive the ring but
+      // never count toward presence — leaving a game makes you away.
       if (game.done === false && (game.seat === "red" || game.seat === "yellow")) {
         live.set(game.code, {
           code: game.code,
@@ -259,6 +261,7 @@ function main() {
             playerId: playerId(),
             have: entry.log.length,
             epoch: entry.epoch,
+            context: "landing",
           }),
         );
       });
@@ -399,6 +402,10 @@ function main() {
     render();
 
     function connect() {
+      // A hidden tab is a player who isn't looking at the game: don't
+      // connect (or reconnect) until the tab is visible again — the
+      // visibilitychange handler reconnects on return.
+      if (document.hidden) return;
       const scheme = location.protocol === "https:" ? "wss://" : "ws://";
       const socket = new WebSocket(scheme + location.host + "/g/" + code + "/ws");
       ws = socket;
@@ -478,7 +485,14 @@ function main() {
     addEventListener("focus", reconnectNow);
     addEventListener("pageshow", reconnectNow);
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) reconnectNow();
+      // Hiding the tab (switching tabs/apps, minimizing) means the
+      // player isn't at the game: close the socket so the server marks
+      // them away, exactly like clicking Leave. Returning reconnects.
+      if (document.hidden) {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+        return;
+      }
+      reconnectNow();
     });
 
     function send(msg) {

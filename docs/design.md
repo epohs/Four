@@ -20,6 +20,7 @@ One screen, no scrolling on any target device:
 
 - The 7×6 board, the centerpiece.
 - A status line: whose turn / who won / draw — with a dot in the turn player's color.
+- Presence means being at the game: hiding the tab (switching tabs/apps, minimizing) closes the socket and marks you away until you return — the same signal as clicking Leave.
 - Score for the link's lifetime (red n — yellow n).
 - A **Rematch** action, visible only when the round is over.
 - A **Share** affordance (copy link) so inviting the second player is one tap.
