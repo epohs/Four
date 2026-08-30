@@ -188,13 +188,28 @@ function main() {
     if (!Array.isArray(recent) || recent.length === 0) return;
     $("recent").hidden = false;
     const list = $("recent-list");
+
+    // Per-game live state, keyed by code, for in-progress games where the
+    // local player holds a seat. Keeps a light WebSocket open per game so
+    // the turn ring can react the moment the opponent moves.
+    const live = new Map();
+
     for (const game of recent) {
       if (typeof game.code !== "string" || !/^[A-Za-z0-9_-]+$/.test(game.code)) continue;
       const item = el("li");
+      const remove = el("button", "remove", "×");
+      remove.title = "Remove";
+      remove.setAttribute(
+        "aria-label",
+        "Remove " + (game.name || game.code) + " from recent games",
+      );
+      remove.addEventListener("click", () => removeRecent(game.code, item));
+      item.append(remove);
       const link = el("a");
       link.href = "/g/" + game.code;
       const seatClass = game.seat === "red" || game.seat === "yellow" ? game.seat : "spectator";
-      link.append(el("span", "chip " + seatClass));
+      const chip = el("span", "chip " + seatClass);
+      link.append(chip);
       // A named game shows its name; unnamed ones fall back to the code.
       if (typeof game.name === "string" && game.name) {
         link.append(el("span", "recent-name", game.name));
@@ -211,6 +226,145 @@ function main() {
       );
       item.append(link);
       list.append(item);
+
+      // Live turn-ring: only in-progress player games are worth a socket.
+      if (game.done === false && (game.seat === "red" || game.seat === "yellow")) {
+        live.set(game.code, {
+          code: game.code,
+          chip,
+          seat: game.seat, // provisional; the server welcome is authoritative
+          log: [],
+          socket: null,
+        });
+      }
+    }
+
+    // The ring shows when it's the seated player's turn in a live round.
+    function applyRing(entry) {
+      const state = derive(entry.log);
+      const myTurn =
+        !state.over && state.turn === entry.seat && (entry.seat === "red" || entry.seat === "yellow");
+      entry.chip.classList.toggle("you", myTurn);
+    }
+
+    function connectLanding(entry) {
+      const scheme = location.protocol === "https:" ? "wss://" : "ws://";
+      const socket = new WebSocket(scheme + location.host + "/g/" + entry.code + "/ws");
+      entry.socket = socket;
+      socket.addEventListener("open", () => {
+        entry.lastAlive = Date.now();
+        socket.send(
+          JSON.stringify({
+            type: "hello",
+            playerId: playerId(),
+            have: entry.log.length,
+            epoch: entry.epoch,
+          }),
+        );
+      });
+      socket.addEventListener("message", (e) => {
+        entry.lastAlive = Date.now();
+        if (e.data === "pong") return;
+        let msg;
+        try {
+          msg = JSON.parse(e.data);
+        } catch {
+          return;
+        }
+        switch (msg.type) {
+          case "welcome":
+            if (typeof msg.epoch === "string") entry.epoch = msg.epoch;
+            if (msg.seat === "red" || msg.seat === "yellow") entry.seat = msg.seat;
+            // Delta sync, same as the game client: when the hello's
+            // have/epoch matched, welcome carries only the suffix.
+            {
+              const events = Array.isArray(msg.log) ? msg.log : [];
+              const from = Number.isInteger(msg.from) ? msg.from : 0;
+              if (from > 0 && from <= entry.log.length) {
+                entry.log = entry.log.slice(0, from).concat(events);
+              } else {
+                entry.log = events;
+              }
+            }
+            applyRing(entry);
+            break;
+          case "appended":
+            if (msg.index === entry.log.length) {
+              entry.log.push(msg.event);
+              applyRing(entry);
+            } else if (msg.index > entry.log.length) {
+              entry.socket.send(
+                JSON.stringify({
+                  type: "resync",
+                  have: entry.log.length,
+                  epoch: entry.epoch,
+                }),
+              );
+            }
+            break;
+          case "log":
+            if (typeof msg.epoch === "string") entry.epoch = msg.epoch;
+            if (msg.from > 0 && msg.from <= entry.log.length) {
+              entry.log = entry.log.slice(0, msg.from).concat(msg.log || []);
+            } else {
+              entry.log = Array.isArray(msg.log) ? msg.log : [];
+            }
+            applyRing(entry);
+            break;
+          default:
+            break;
+        }
+      });
+      socket.addEventListener("close", () => {
+        // The ring is derived exclusively from the event log by
+        // applyRing() — never set directly by lifecycle events, so a
+        // transient disconnect (DO restart, network blip) can't make
+        // it flicker. If the game state actually changed while we
+        // were offline, the next welcome/log will correct it.
+        // Don't resurrect games the user removed from the list.
+        if (live.has(entry.code)) {
+          setTimeout(() => {
+            if (live.has(entry.code)) connectLanding(entry);
+          }, 5000);
+        }
+      });
+    }
+
+    // Heartbeat like the game client: keeps sockets alive across idle and
+    // detects dead ones so the retry above takes over.
+    setInterval(() => {
+      for (const entry of live.values()) {
+        if (!entry.socket || entry.socket.readyState !== WebSocket.OPEN) continue;
+        if (Date.now() - entry.lastAlive > 45000) entry.socket.close();
+        else entry.socket.send("ping");
+      }
+    }, 20000);
+
+    for (const entry of live.values()) connectLanding(entry);
+
+    /*
+     * Removing a recent game. Briefly fade the row out, then drop it
+     * from the DOM and delete its entry from the shared recent list in
+     * local storage. The click can't reach the link (it's a separate
+     * button), so navigation won't be triggered by a remove. The live
+     * socket is also closed so it stops reporting presence.
+     */
+    function removeRecent(code, item) {
+      const entry = live.get(code);
+      if (entry && entry.socket) entry.socket.close();
+      live.delete(code);
+      item.classList.add("removing");
+      const done = () => {
+        item.remove();
+        const stored = store.get("four:recent", []);
+        const updated = (Array.isArray(stored) ? stored : []).filter(
+          (g) => g && g.code !== code,
+        );
+        store.set("four:recent", updated);
+        if (updated.length === 0) $("recent").hidden = true;
+      };
+      if (matchMedia("(prefers-reduced-motion: reduce)").matches) done();
+      else setTimeout(done, 200);
     }
   }
 
@@ -581,27 +735,38 @@ function main() {
         for (let r = 5; r >= 0; r--) {
           const cell = el("div", "cell");
           const occupant = state.board[r][c];
-          if (occupant) {
-            const piece = el("div", "piece " + occupant);
-            if (state.over && state.over.cells.some(([wr, wc]) => wr === r && wc === c)) {
-              piece.classList.add("win");
-            }
-            if (
-              animate &&
-              state.lastMove &&
-              state.lastMove.row === r &&
-              state.lastMove.col === c
-            ) {
-              const rowsFromTop = 5 - r;
-              piece.style.setProperty(
-                "--fall",
-                `calc(${rowsFromTop + 1} * var(--cell) * -1)`,
-              );
-              piece.style.animationDuration = 150 + rowsFromTop * 25 + "ms";
-              piece.classList.add("drop");
-            }
-            cell.append(piece);
-          } else if (playable && r === landing) {
+            if (occupant) {
+              const piece = el("div", "piece " + occupant);
+              if (state.over && state.over.cells.some(([wr, wc]) => wr === r && wc === c)) {
+                piece.classList.add("win");
+              }
+              const isLast =
+                state.lastMove && state.lastMove.row === r && state.lastMove.col === c;
+              if (isLast && !animate) piece.classList.add("last");
+              if (animate && isLast) {
+                const rowsFromTop = 5 - r;
+                piece.style.setProperty(
+                  "--fall",
+                  `calc(${rowsFromTop + 1} * var(--cell) * -1)`,
+                );
+                piece.style.animationDuration = 150 + rowsFromTop * 25 + "ms";
+                piece.classList.add("drop");
+                // `last` is added only once the fall ends: both classes set the
+                // `animation` shorthand, so on one element the later rule would
+                // win the shorthand and cancel the fall. The inline duration
+                // set for the fall must also be dropped so the stylesheet's
+                // pulse duration applies once we switch over.
+                piece.addEventListener(
+                  "animationend",
+                  () => {
+                    piece.style.animationDuration = "";
+                    piece.classList.add("last");
+                  },
+                  { once: true },
+                );
+              }
+              cell.append(piece);
+            } else if (playable && r === landing) {
             cell.append(el("div", "piece ghost " + seat));
           }
           colEl.append(cell);
