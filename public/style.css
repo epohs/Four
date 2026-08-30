@@ -191,34 +191,76 @@ button:active {
 
 #game {
   /* Cell size from the viewport's limiting dimension: the whole board
-     always fits with the chrome around it, no scrolling anywhere. */
-  --cell: min(calc((100dvw - 3rem) / 7), calc((100dvh - 13rem) / 6), 78px);
+     always fits with the chrome around it, no scrolling anywhere. The
+     height budget also reserves room for the big wordmark header up top. */
+  --header-top: clamp(0.5rem, 4dvh, 2rem);
+  --wordmark-size: 3.45rem;
+  --header-bottom: clamp(1.25rem, 5dvh, 2.5rem);
+  --header: calc(var(--header-top) + var(--wordmark-size) + var(--header-bottom));
+  --cell: min(
+    calc((100dvw - 3rem) / 7),
+    calc((100dvh - (13rem + var(--header))) / 6),
+    78px
+  );
   height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 1rem;
+  overflow: hidden;
+}
+
+/* The wordmark ("Four") on its own line at the top, not centered with the
+   board: higher but not flush to the viewport, with breathing room below so
+   the HUD and score sit roughly where they always have. */
+.game-wordmark {
+  flex: 0 0 auto;
+  font-size: var(--wordmark-size);
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--fg);
+  text-decoration: none;
+  margin-top: var(--header-top);
+  margin-bottom: var(--header-bottom);
+}
+
+/* Everything below the wordmark centers itself in the space that remains, so
+   the board's vertical position stays stable instead of getting pushed down. */
+.game-core {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: clamp(0.5rem, 2dvh, 1.1rem);
-  padding: 1rem;
-  overflow: hidden;
 }
 
-/* Short landscape (phones): controls beside the board, height drives cells. */
+/* Short landscape (phones): controls beside the board, height drives cells.
+   The core is flattened via display:contents so its children become grid
+   items of #game; the wordmark tucks compactly above the left column. */
 @media (orientation: landscape) and (max-height: 480px) {
   #game {
+    --header-top: 0.25rem;
+    --wordmark-size: 1.6rem;
+    --header-bottom: 0.35rem;
     --cell: min(calc((100dvh - 3.5rem) / 6), calc((100dvw - 19rem) / 7), 78px);
     display: grid;
     grid-template-columns: max-content auto;
-    grid-template-rows: 1fr auto 1fr;
+    grid-template-rows: auto auto auto 1fr;
     align-content: center;
     justify-content: center;
     column-gap: clamp(1.2rem, 4dvw, 2.5rem);
-    row-gap: 0.8rem;
+    row-gap: 0.6rem;
   }
-  #game .board { grid-column: 2; grid-row: 1 / 4; align-self: center; }
-  #game .hud { grid-column: 1; grid-row: 1; align-self: end; }
-  #game .status { grid-column: 1; grid-row: 2; }
-  #game .actions { grid-column: 1; grid-row: 3; align-self: start; }
+  #game .game-wordmark { grid-column: 1; grid-row: 1; align-self: end; }
+  #game .game-core { display: contents; }
+  #game .board { grid-column: 2; grid-row: 1 / 5; align-self: center; }
+  #game .hud { grid-column: 1; grid-row: 2; align-self: end; }
+  #game .status { grid-column: 1; grid-row: 3; }
+  #game .actions { grid-column: 1; grid-row: 4; align-self: start; }
 }
 
 .hud {
@@ -226,9 +268,6 @@ button:active {
   align-items: baseline;
   gap: 1.1rem;
   max-width: 100%;
-}
-.hud .wordmark {
-  font-size: 1.15rem;
 }
 
 /* Game name: quiet next to the wordmark, truncates before it can wrap. */
