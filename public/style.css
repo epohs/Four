@@ -34,6 +34,9 @@
   --red: light-dark(oklch(60% 0.19 27), oklch(65% 0.17 27));
   --yellow: light-dark(oklch(79% 0.16 90), oklch(82% 0.155 92));
   --shadow: light-dark(oklch(20% 0.02 90 / 0.14), oklch(0% 0 0 / 0.5));
+  /* the board's contact shadow: heavier in light mode, where a light
+     shadow reads faint against the pale background */
+  --board-shadow: light-dark(oklch(20% 0.02 90 / 0.28), var(--shadow));
 }
 :root[data-theme="light"] {
   color-scheme: light;
@@ -378,7 +381,7 @@ button:active {
   padding: calc(var(--cell) * 0.14);
   border-radius: calc(var(--cell) * 0.22);
   /* a quiet contact shadow beneath: the board rests on the page */
-  box-shadow: 0 12px 20px -14px var(--shadow);
+  box-shadow: 0 12px 20px -14px var(--board-shadow);
   overflow: hidden; /* falling pieces enter from behind the frame, not over the page */
 }
 .col {
