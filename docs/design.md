@@ -19,7 +19,7 @@ No hero images, no marketing, no footer clutter.
 One screen, no scrolling on any target device:
 
 - The 7×6 board, the centerpiece.
-- A status line: whose turn / who won / draw — plus the opponent presence dot.
+- A status line: whose turn / who won / draw — with a dot in the turn player's color.
 - Score for the link's lifetime (red n — yellow n).
 - A **Rematch** action, visible only when the round is over.
 - A **Share** affordance (copy link) so inviting the second player is one tap.
@@ -52,6 +52,7 @@ Restrained. Animation exists to communicate, not to decorate:
 
 - **Piece drop:** the one signature animation — a piece falls from the top of the column to its resting row, fast (~150–300ms depending on distance), with at most a single small settle. Applies to your moves, live opponent moves, and replayed history *only if* replay is instant otherwise (no slow-motion replays of long games — render historical state immediately, animate only new events).
 - **Win:** the four winning cells get a quiet highlight. No confetti, no shaking.
+- **Presence pulse:** the scoreboard chips pulse while the corresponding player is connected — liveness at a glance.
 - Theme switches and presence changes transition briefly or not at all.
 - Respect `prefers-reduced-motion`: with it set, pieces appear in place without the drop.
 

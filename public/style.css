@@ -109,6 +109,12 @@ button:active {
 .chip.yellow { background: var(--yellow); }
 .chip.spectator { background: var(--muted); }
 .chip.you { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--muted); }
+/* In the scoreboard, a chip pulses while that player is connected.
+   The pulse fades the fill only, so the "you" ring around it stays
+   solid. */
+#score .chip.on {
+  animation: chip-pulse 1.25s ease-in-out infinite;
+}
 
 /* ---------------- landing ---------------- */
 
@@ -349,6 +355,8 @@ button:active {
   min-height: 1.4rem;
   font-size: 1.05rem;
 }
+/* Status dot: the color shows whose turn it is (grey when that player
+   is away). Presence lives on the scoreboard chips' pulse instead. */
 .dot {
   width: 0.6rem;
   height: 0.6rem;
@@ -441,6 +449,12 @@ button:active {
   60% { opacity: 0.6; }
   100% { opacity: 1; }
 }
+@keyframes chip-pulse {
+  0%, 20%, 100% { background: var(--chip-pulse-color); }
+  60% { background: color-mix(in oklch, var(--chip-pulse-color) 55%, transparent); }
+}
+#score .chip.red.on { --chip-pulse-color: var(--red); }
+#score .chip.yellow.on { --chip-pulse-color: var(--yellow); }
 .piece.last {
   animation: pulse 1.25s ease-in-out infinite;
 }
@@ -450,6 +464,9 @@ button:active {
     animation: none;
   }
   .piece.last {
+    animation: none;
+  }
+  #score .chip.on {
     animation: none;
   }
 }

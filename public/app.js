@@ -665,13 +665,15 @@ function main() {
 
     function renderScore(state) {
       scoreEl.textContent = "";
-      const redChip = el("span", "chip red");
-      const yellowChip = el("span", "chip yellow");
+      const redChip = el("span", "chip red" + (presence.red ? " on" : ""));
+      const yellowChip = el("span", "chip yellow" + (presence.yellow ? " on" : ""));
       if (seat === "red") redChip.classList.add("you");
       if (seat === "yellow") yellowChip.classList.add("you");
       if (seat === "red" || seat === "yellow") {
         (seat === "red" ? redChip : yellowChip).title = "You";
       }
+      if (seat !== "red") redChip.title = presence.red ? "Red is here" : "Red is away";
+      if (seat !== "yellow") yellowChip.title = presence.yellow ? "Yellow is here" : "Yellow is away";
       scoreEl.append(
         redChip,
         document.createTextNode(` ${state.score.red} — ${state.score.yellow} `),
@@ -696,11 +698,17 @@ function main() {
       statusEl.append(el("span", null, text));
 
       if (!connected || !seat) return;
-      // Presence: a player sees the opponent's dot; a spectator sees both.
-      const dotsFor = seat === "spectator" ? ["red", "yellow"] : [otherSeat(seat)];
-      for (const s of dotsFor) {
-        const dot = el("span", "dot " + s + (presence[s] ? " on" : ""));
-        dot.title = cap(s) + (presence[s] ? " is here" : " is away");
+      // One dot for everyone: colored by whoever's turn it is; grey
+      // (base) when that player is away. Presence shows on the
+      // scoreboard chips' pulse instead.
+      const turn = state.turn;
+      if (turn === "red" || turn === "yellow") {
+        const dot = el("span", "dot " + turn + (presence[turn] ? " on" : ""));
+        dot.title = cap(turn) + " to move" + (presence[turn] ? " · here" : " · away");
+        statusEl.append(dot);
+      } else {
+        const dot = el("span", "dot");
+        dot.title = "Round over";
         statusEl.append(dot);
       }
     }
