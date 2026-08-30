@@ -228,7 +228,7 @@ button:active {
      height budget also reserves room for the big wordmark header up top. */
   --header-top: clamp(0.5rem, 4dvh, 2rem);
   --wordmark-size: 3.45rem;
-  --header-bottom: clamp(1.25rem, 5dvh, 2.5rem);
+  --header-bottom: clamp(1.25rem, 3dvh, 2rem);
   --header: calc(var(--header-top) + var(--wordmark-size) + var(--header-bottom));
   --cell: min(
     calc((100dvw - 3rem) / 7),
@@ -259,7 +259,7 @@ button:active {
 }
 
 /* Everything below the wordmark centers itself in the space that remains, so
-   the board's vertical position stays stable instead of getting pushed down. */
+    the board's vertical position stays stable instead of getting pushed down. */
 .game-core {
   flex: 1 1 auto;
   min-height: 0;
