@@ -77,6 +77,16 @@ Renames the game. Accepted only from the `red` seat (the creator — red is the 
 
 Anything invalid — wrong seat, non-string, empty after trimming — is ignored silently: the client shows the rename affordance only to red, so a rejection would have no one to inform.
 
+### signal
+
+```jsonc
+{ "type": "signal", "name": "dismiss" }
+```
+
+A transient message relayed to every other socket in the game and stored nowhere. The server does not know what a signal means — this is fan-out and nothing else, which is deliberately why it stays clear of the event log: a signal is not game history, it carries no index, and two arriving at once cannot race the way two appends would. It does not reset the expiry alarm.
+
+Accepted from seated players only (`name` a string of at most 32 characters); anything else is ignored silently. The only name in use is `dismiss` — either player clearing the end-of-round celebration clears it for both of them and every spectator. A spectator's own dismissal is local and sends nothing.
+
 ## Server → client
 
 ### welcome (reply to hello)
@@ -126,6 +136,14 @@ Carries the name the registry actually granted, which may differ from what `set_
 ```
 
 A seat is `true` while at least one **game-page** socket holding it is connected — landing-page turn-ring sockets (`hello` `context: "landing"`) never count. Clients also close their socket while the tab is hidden, so presence means the player is actually looking at the game; returning to the tab reconnects and re-marks them present. Never stored. Broadcast after every `hello` (to everyone but the joiner, whose `welcome` already carries it) and when a **seated** game socket closes — a spectator, pre-hello, or landing socket leaving changes nothing, so nothing is sent.
+
+### signal (relayed)
+
+```jsonc
+{ "type": "signal", "name": "dismiss" }
+```
+
+The relay of a client's `signal`, delivered to every socket in the game except the sender. Never stored, so a client joining later learns nothing about signals it missed — which is correct for `dismiss`, since the celebration it clears only ever fires live. Landing-page sockets receive these and ignore them under the forward-compatibility rule.
 
 ### resync request and reply
 

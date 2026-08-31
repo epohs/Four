@@ -84,6 +84,10 @@ const MAX_NAME = 16;
 // storage write fails. Past it, appends are rejected with "log_full".
 const MAX_LOG = 20000;
 
+// Longest signal name relayed between clients. Signals are transient
+// UI coordination, never stored — the cap just keeps the relay small.
+const MAX_SIGNAL = 32;
+
 // Socket cap: a legitimate game never has more than a handful of
 // sockets (two players across a few tabs, a couple of spectators, the
 // landing page's turn-rings). Past this we evict or refuse, so a
@@ -171,6 +175,9 @@ export class GameDO {
         break;
       case "set_name":
         await this.handleSetName(attachment, msg);
+        break;
+      case "signal":
+        this.handleSignal(ws, attachment, msg);
         break;
       default:
         break; // unknown types are ignored — forward-compatibility rule
@@ -337,6 +344,24 @@ export class GameDO {
     await this.state.storage.put("name", name);
     await this.resetExpiry();
     this.broadcast({ type: "name", name });
+  }
+
+  /**
+   * Relay a transient signal to everyone else in the game. The server
+   * neither stores it nor knows what it means — this is fan-out and
+   * nothing else, which is why it stays clear of the event log: a
+   * signal is not game history, it carries no index, and two of them
+   * arriving at once can't race the way two appends would.
+   *
+   * Seated players only. A spectator clearing their own screen is
+   * their business, not everyone's, and the expiry alarm is left alone
+   * — signals are not the kind of activity that should keep a game
+   * alive for another 90 days.
+   */
+  private handleSignal(ws: WebSocket, attachment: Attachment, msg: any): void {
+    if (attachment.seat === "spectator") return;
+    if (typeof msg.name !== "string" || msg.name.length > MAX_SIGNAL) return;
+    this.broadcast({ type: "signal", name: msg.name }, ws);
   }
 
   private async getLog(): Promise<GameEvent[]> {

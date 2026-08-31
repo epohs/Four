@@ -438,6 +438,21 @@ function main() {
     let reconnectTimer = null;
     let lastAlive = Date.now(); // last time any frame arrived on the socket
 
+    // Clearing the moment clears it for everyone at this game — either
+    // player can do it, for both of them and every spectator. A
+    // spectator's own click only clears their screen; a signal relayed
+    // back would just bounce around the room.
+    const celebration = createCelebration(boardEl, () => {
+      if (seat === "red" || seat === "yellow") send({ type: "signal", name: "dismiss" });
+    });
+    let celebratedRound = null; // the round whose ending we've already played
+    let celebrateTimer = null;
+
+    // Iterating on the celebration otherwise means two browsers and a
+    // full game per attempt. From the console: fourCelebrate("win"),
+    // ("loss") or ("draw"). Local only — it sends no dismiss signal.
+    window.fourCelebrate = (kind) => celebration.play(CELEBRATIONS[kind] || CELEBRATIONS.win);
+
     connect();
     render();
 
@@ -616,6 +631,10 @@ function main() {
           presence = { red: !!msg.red, yellow: !!msg.yellow };
           render();
           break;
+        case "signal":
+          // Someone at this game cleared the end-of-round moment.
+          if (msg.name === "dismiss") clearCelebration();
+          break;
         default:
           break; // unknown types are ignored — forward-compatibility rule
       }
@@ -665,6 +684,43 @@ function main() {
       rematchBtn.hidden = !(
         state.over && connected && (seat === "red" || seat === "yellow")
       );
+      maybeCelebrate(state, animate);
+    }
+
+    /*
+     * The end-of-round moment, once per round, and only when the round
+     * ends live in front of you — `animate` marks an event that just
+     * arrived. Opening or resyncing a finished game replays the board
+     * but never the celebration; otherwise every refresh would set it
+     * off again, and an async player would be met by a trophy for a
+     * round that ended yesterday.
+     */
+    function maybeCelebrate(state, animate) {
+      if (!state.over) {
+        // A rematch (yours or theirs) clears the board underneath.
+        celebratedRound = null;
+        clearCelebration();
+        return;
+      }
+      if (!animate || celebratedRound === state.round) return;
+      celebratedRound = state.round;
+
+      let spec;
+      if (state.over.winner === null) spec = CELEBRATIONS.draw;
+      else if (state.over.winner === seat) spec = CELEBRATIONS.win;
+      else if (seat === "red" || seat === "yellow") spec = CELEBRATIONS.loss;
+      // A spectator didn't lose — they watched somebody win, so they
+      // get the win, retitled to name whose it was.
+      else spec = { ...CELEBRATIONS.win, title: cap(state.over.winner) + " wins" };
+
+      clearTimeout(celebrateTimer);
+      celebrateTimer = setTimeout(() => celebration.play(spec), CELEBRATE_DELAY_MS);
+    }
+
+    /** Clear the moment, including one that hasn't opened yet. */
+    function clearCelebration() {
+      clearTimeout(celebrateTimer);
+      celebration.dismiss();
     }
 
     /*
@@ -863,4 +919,565 @@ function main() {
       location.href = "/";
     });
   }
+}
+
+/* ================================================================
+ * Celebration — the end-of-round moment.
+ *
+ * One full-viewport layer: a dimmer, a canvas of paint splatters, and
+ * an emoji centered on the board. The game code only picks a spec and
+ * says "play"; the layer owns its DOM, its animation loop, and its
+ * teardown, and hands nothing back.
+ *
+ * The splatter effect is our own canvas implementation, inspired by
+ * confetti.ts by LoaderB0T (MIT) — https://github.com/LoaderB0T/confetti.ts
+ * — but shares no code with it: this project ships zero third-party
+ * assets, and a splat here is a closed-form ease rather than a
+ * per-frame physics step.
+ * ================================================================ */
+
+/**
+ * What each outcome plays. `entrance` names the emoji's arrival (a
+ * matching `entrance-*` class drives it from the stylesheet), `dim` is
+ * the opacity of the black scrim behind it, and `splatter` is the
+ * paint. Winning keeps a lighter scrim than the other two: the paint
+ * lands in front of it and wants a ground to read against, not a
+ * blackout.
+ *
+ * `title` is the default; a spectator's is built at play time, since
+ * nobody watching a game they aren't in has won or lost anything.
+ */
+const CELEBRATIONS = {
+  win: { title: "You win", emoji: "🏆", entrance: "grow", splatter: true, dim: 0.5 },
+  loss: { title: "You lose", emoji: "😞", entrance: "drop", splatter: false, dim: 0.85 },
+  draw: { title: "Draw", emoji: "🤝", entrance: "slam", splatter: false, dim: 0.85 },
+};
+
+// Just long enough for the winning piece to land — the paint should
+// read as starting with the win, not as a beat after it.
+const CELEBRATE_DELAY_MS = 280;
+
+function createCelebration(boardEl, onUserDismiss) {
+  // Bright enough to read on either theme, and spread far enough
+  // around the hue circle that three random picks rarely look like one
+  // color. Indexed, not named: dots store the index so the dissolve can
+  // batch thousands of them into a handful of fills.
+  const PALETTE = [
+    "oklch(63% 0.22 27)", // red
+    "oklch(72% 0.19 55)", // orange
+    "oklch(84% 0.17 95)", // yellow
+    "oklch(74% 0.20 145)", // green
+    "oklch(74% 0.14 195)", // teal
+    "oklch(62% 0.19 258)", // blue
+    "oklch(58% 0.24 300)", // violet
+    "oklch(68% 0.23 350)", // pink
+  ];
+
+  // A splat's dots ease out to their resting distance and then never
+  // move again — this is paint, not confetti. ~99% of the way by 5τ.
+  const SETTLE_TAU = 110;
+  const SETTLE_MS = 620;
+
+  // Splats per second. The rate climbs for the whole build so the
+  // field reads as still gathering pace, never as having levelled off.
+  const RATE_START = 9;
+  const RATE_END = 34;
+  const RAMP_MS = 3000;
+  // How fast the splats stop keeping to the top half and start landing
+  // anywhere — quick, so it matches the emoji finishing its growth.
+  const REGION_MS = 1200;
+  // The paint budget for the whole show, set from the viewport in
+  // measure(): one dot per this many CSS pixels of screen, so a phone
+  // gets the same density as a desktop rather than the same count.
+  // Accumulated paint costs nothing per frame — the ceiling is here
+  // because the dissolve is the one pass that redraws every dot, and
+  // that is the machine-dependent part.
+  const PIXELS_PER_DOT = 142;
+  const DOTS_FLOOR = 1800;
+  const DOTS_CEILING = 4300;
+  let maxDots = DOTS_CEILING;
+  // Backstop, in case a viewport is big enough that the cap never lands.
+  const SPAWN_MS = 9000;
+
+  // Dissolve: every dot goes out on its own schedule, so the field
+  // comes apart rather than blinking off as one sheet.
+  const STAGGER_MS = 280;
+  const DOT_FADE_MS = 170;
+  const OUT_MS = STAGGER_MS + DOT_FADE_MS;
+  // An emoji-only ending has no paint to dissolve; it just waits out
+  // the stylesheet's fade.
+  const PLAIN_OUT_MS = 240;
+
+  // Alpha is quantized during the dissolve so a few thousand dots
+  // collapse into (steps × colors) filled paths per frame.
+  const ALPHA_STEPS = 6;
+  const TWO_PI = Math.PI * 2;
+
+  let layer = null;
+  let dimEl = null;
+  let titleEl = null;
+  let emojiEl = null;
+  // Settled paint. Drawn into once per splat and never cleared during
+  // the show, so accumulated paint costs nothing per frame.
+  let paint = null;
+  let paintCtx = null;
+  // Splats still expanding. Cleared and redrawn every frame — only
+  // ever a handful.
+  let fly = null;
+  let flyCtx = null;
+
+  let flying = []; // splats mid-expansion
+  let pending = 0; // dots owed to `dots` by the splats still flying
+  let dots = []; // every dot placed: { x, y, r, ci, d }
+  let centers = []; // splat centers so far, for spacing the next one
+  let buckets = []; // reused dissolve draw buckets: [alphaStep][colorIndex]
+
+  let raf = 0;
+  let startedAt = 0;
+  let lastFrame = 0;
+  let owed = 0; // fractional splats carried between frames
+  let closing = false;
+  let closedAt = 0;
+  let closeTimer = null;
+  let w = 0;
+  let h = 0;
+
+  function build() {
+    layer = document.createElement("div");
+    layer.className = "celebration";
+    // Decorative: the status line already announces the result.
+    layer.setAttribute("aria-hidden", "true");
+
+    dimEl = document.createElement("div");
+    dimEl.className = "celebration-dim";
+    paint = document.createElement("canvas");
+    paint.className = "celebration-canvas";
+    fly = document.createElement("canvas");
+    fly.className = "celebration-canvas";
+    titleEl = document.createElement("span");
+    titleEl.className = "celebration-title";
+    emojiEl = document.createElement("span");
+    emojiEl.className = "celebration-emoji";
+
+    layer.append(dimEl, paint, fly, titleEl, emojiEl);
+    paintCtx = paint.getContext("2d");
+    flyCtx = fly.getContext("2d");
+    layer.addEventListener("pointerdown", userDismiss);
+
+    for (let step = 0; step < ALPHA_STEPS; step++) {
+      buckets.push(PALETTE.map(() => []));
+    }
+  }
+
+  function measure() {
+    w = window.innerWidth;
+    h = window.innerHeight;
+    maxDots = Math.max(
+      DOTS_FLOOR,
+      Math.min(Math.round((w * h) / PIXELS_PER_DOT), DOTS_CEILING),
+    );
+    // Cap the backing store at 2x: past that a phone pays for pixels
+    // nobody can see in a field of 3px dots.
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    for (const [canvas, context] of [[paint, paintCtx], [fly, flyCtx]]) {
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    // Resizing blanks the backing store, so the settled paint has to be
+    // laid down again. Dots keep their absolute positions — paint on a
+    // wall doesn't reflow when the window changes shape.
+    repaint();
+    place();
+  }
+
+  /**
+   * Center the emoji on the board, wherever the layout has put it, and
+   * hang the title above it. Both are sized here rather than in the
+   * stylesheet because both depend on the board — and on each other,
+   * since the title has to fit in whatever room the emoji leaves.
+   */
+  function place() {
+    const rect = boardEl.getBoundingClientRect();
+    // Viewport height bounds the emoji too: a short landscape phone
+    // would otherwise fill the screen and leave the title nowhere.
+    const size = Math.max(
+      101,
+      Math.min(rect.width * 0.72, window.innerHeight * 0.34, 288),
+    );
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    emojiEl.style.left = centerX + "px";
+    emojiEl.style.top = centerY + "px";
+    emojiEl.style.setProperty("--size", size + "px");
+    // The grow starts at 12px, whatever the finished size works out to.
+    emojiEl.style.setProperty("--from", (12 / size).toFixed(4));
+    // The drop starts fully above the viewport, so it enters from off
+    // screen however tall the window is or wherever the board sits.
+    emojiEl.style.setProperty("--drop", centerY + size + "px");
+    emojiEl.style.setProperty("--bounce", size * 0.06 + "px");
+
+    // The title takes the largest size that clears the emoji, spans no
+    // more than the viewport, and stays under a sane ceiling — the
+    // width term is why "Yellow wins" on a narrow phone comes out
+    // smaller than "Draw" does.
+    const gap = Math.max(18, size * 0.12);
+    const bottom = centerY - size / 2 - gap;
+    const budget = window.innerWidth * 0.92;
+    const chars = Math.max(4, titleEl.textContent.length);
+    const titleSize = Math.max(
+      24,
+      Math.min(
+        budget / (chars * 0.52), // across, optimistically — corrected below
+        (bottom - 12) / 1.15, // above the emoji, leaving a top margin
+        window.innerHeight * 0.13,
+        96,
+      ),
+    );
+    titleEl.style.left = centerX + "px";
+    titleEl.style.top = bottom + "px";
+    titleEl.style.setProperty("--title-size", titleSize + "px");
+
+    // Character counting only estimates a proportional font's width, so
+    // measure what actually rendered and scale back if the glyphs came
+    // out wider than the budget. Exact beats guessing, and it means the
+    // guess above can afford to be generous.
+    const actual = titleEl.offsetWidth;
+    if (actual > budget) {
+      titleEl.style.setProperty("--title-size", (titleSize * budget) / actual + "px");
+    }
+  }
+
+  /** Lay every settled dot back down, one filled path per color. */
+  function repaint() {
+    paintCtx.clearRect(0, 0, w, h);
+    for (let ci = 0; ci < PALETTE.length; ci++) {
+      let drew = false;
+      paintCtx.fillStyle = PALETTE[ci];
+      paintCtx.beginPath();
+      for (const dot of dots) {
+        if (dot.ci !== ci) continue;
+        drew = true;
+        blob(paintCtx, dot.x, dot.y, dot.rx, dot.ry, dot.rot);
+      }
+      if (drew) paintCtx.fill();
+    }
+  }
+
+  /**
+   * One droplet inside a batched path — an ellipse, not a circle:
+   * thrown paint stretches along its flight, and a field of perfect
+   * circles reads as dots rather than splatter. Costs the same as an
+   * arc and batches identically.
+   *
+   * The moveTo is not optional, and has to land on the ellipse's own
+   * start point: without it each shape joins the previous one and the
+   * whole path fills as a web of connecting lines.
+   */
+  function blob(context, x, y, rx, ry, rot) {
+    context.moveTo(x + rx * Math.cos(rot), y + rx * Math.sin(rot));
+    context.ellipse(x, y, rx, ry, rot, 0, TWO_PI);
+  }
+
+  /**
+   * Where the next splat lands. Uniform random clumps and leaves bald
+   * patches; taking the farthest of a few candidates from the paint
+   * already down spreads the field over the whole viewport without
+   * ever looking like it was laid out on a grid.
+   */
+  function pickSpot(region) {
+    // Centers stay off the edges, though the paint itself may bleed past.
+    const pad = Math.min(w, h) * 0.1;
+    const band = h * (0.5 + 0.5 * region); // top half at first, all of it later
+    let best = null;
+    let bestGap = -1;
+    for (let i = 0; i < 3; i++) {
+      const x = pad + Math.random() * Math.max(1, w - pad * 2);
+      const y = pad + Math.random() * Math.max(1, band - pad * 2);
+      let gap = Infinity;
+      for (const other of centers) {
+        const dx = other.x - x;
+        const dy = other.y - y;
+        gap = Math.min(gap, dx * dx + dy * dy);
+      }
+      if (gap > bestGap) {
+        bestGap = gap;
+        best = { x, y };
+      }
+    }
+    return best;
+  }
+
+  function spawn(now, region) {
+    const { x, y } = pickSpot(region);
+    centers.push({ x, y });
+
+    const size = Math.min(w, h);
+    const reach = size * (0.11 + Math.random() * 0.14);
+    // Dots scale with the viewport so a phone doesn't get a coarser
+    // splat than a desktop.
+    const grain = Math.min(1.35, Math.max(0.7, size / 720));
+    const count = 24 + Math.floor(Math.random() * 15);
+
+    // Three colors per splat, dots bucketed by color at birth, so
+    // drawing one mid-flight splat is three filled paths.
+    const groups = [
+      { ci: Math.floor(Math.random() * PALETTE.length), pts: [] },
+      { ci: Math.floor(Math.random() * PALETTE.length), pts: [] },
+      { ci: Math.floor(Math.random() * PALETTE.length), pts: [] },
+    ];
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * TWO_PI;
+      // Biased outward so the splat has a dense middle and a few fliers.
+      const distance = reach * Math.pow(Math.random(), 0.55);
+      const r = (1.3 + Math.pow(Math.random(), 2) * 3.6) * grain;
+      // The further a droplet was thrown the more it stretches, and
+      // most stay near-round — a field where every dot is elongated
+      // looks combed rather than splattered. `stretch` is the long/short
+      // axis ratio, so this tops out at a gentle 2:1 with the typical
+      // droplet nearer 1.2:1. Area is held constant, so shape changes
+      // without coverage changing with it.
+      const stretch = 1 + (distance / reach) * Math.pow(Math.random(), 1.5) * 1.0;
+      const skew = Math.sqrt(stretch);
+      groups[i % 3].pts.push({
+        dx: Math.cos(angle) * distance,
+        dy: Math.sin(angle) * distance,
+        rx: r * skew,
+        ry: r / skew,
+        // Along the flight path, loosened a little so the field doesn't
+        // read as a starburst of perfectly radial strokes.
+        rot: angle + (Math.random() - 0.5) * 0.7,
+      });
+    }
+    pending += count;
+    // Born on the frame's clock, not performance.now(): the frame
+    // timestamp trails the real one, and a splat born "in the future"
+    // reads as a negative age and briefly implodes instead of bursting.
+    flying.push({ x, y, born: now, count, groups });
+  }
+
+  /**
+   * Move a splat off the live list and into the settled paint. `spread`
+   * is where its dots have got to (1 once it has finished): dismissing
+   * mid-burst has to freeze them where they are, or a splat that is
+   * 100ms old snaps to full size on the way out.
+   */
+  function settle(splat, spread) {
+    pending -= splat.count;
+    for (const group of splat.groups) {
+      paintCtx.fillStyle = PALETTE[group.ci];
+      paintCtx.beginPath();
+      for (const pt of group.pts) {
+        const x = splat.x + pt.dx * spread;
+        const y = splat.y + pt.dy * spread;
+        blob(paintCtx, x, y, pt.rx, pt.ry, pt.rot);
+        // `d` is this dot's place in the dissolve queue, fixed now so
+        // the order is scattered rather than following the paint order.
+        dots.push({ x, y, rx: pt.rx, ry: pt.ry, rot: pt.rot, ci: group.ci, d: Math.random() });
+      }
+      paintCtx.fill();
+    }
+  }
+
+  function spawning(age) {
+    return age < SPAWN_MS && dots.length + pending < maxDots;
+  }
+
+  function advance(now, age, dt) {
+    if (spawning(age)) {
+      const rate = RATE_START + (RATE_END - RATE_START) * Math.min(1, age / RAMP_MS);
+      const region = Math.min(1, age / REGION_MS);
+      owed += rate * (dt / 1000);
+      while (owed >= 1 && spawning(age)) {
+        owed -= 1;
+        spawn(now, region);
+      }
+      owed = Math.min(owed, 1); // never bank a backlog that dumps as one burst
+    }
+
+    flyCtx.clearRect(0, 0, w, h);
+    let live = 0;
+    for (let i = 0; i < flying.length; i++) {
+      const splat = flying[i];
+      const splatAge = now - splat.born;
+      if (splatAge >= SETTLE_MS) {
+        settle(splat, 1);
+        continue;
+      }
+      flying[live++] = splat;
+      const spread = 1 - Math.exp(-splatAge / SETTLE_TAU);
+      for (const group of splat.groups) {
+        flyCtx.fillStyle = PALETTE[group.ci];
+        flyCtx.beginPath();
+        for (const pt of group.pts) {
+          blob(flyCtx, splat.x + pt.dx * spread, splat.y + pt.dy * spread, pt.rx, pt.ry, pt.rot);
+        }
+        flyCtx.fill();
+      }
+    }
+    flying.length = live;
+  }
+
+  /** The dissolve: each dot fades on its own clock, staggered by `d`. */
+  function dissolve(now) {
+    const t = now - closedAt;
+    for (const row of buckets) {
+      for (const bucket of row) bucket.length = 0;
+    }
+    for (const dot of dots) {
+      const alpha = 1 - (t - dot.d * STAGGER_MS) / DOT_FADE_MS;
+      if (alpha <= 0) continue;
+      const step = alpha >= 1 ? ALPHA_STEPS - 1 : Math.floor(alpha * ALPHA_STEPS);
+      buckets[step][dot.ci].push(dot);
+    }
+
+    paintCtx.clearRect(0, 0, w, h);
+    for (let step = 0; step < ALPHA_STEPS; step++) {
+      paintCtx.globalAlpha = (step + 1) / ALPHA_STEPS;
+      for (let ci = 0; ci < PALETTE.length; ci++) {
+        const bucket = buckets[step][ci];
+        if (bucket.length === 0) continue;
+        paintCtx.fillStyle = PALETTE[ci];
+        paintCtx.beginPath();
+        for (const dot of bucket) blob(paintCtx, dot.x, dot.y, dot.rx, dot.ry, dot.rot);
+        paintCtx.fill();
+      }
+    }
+    paintCtx.globalAlpha = 1;
+  }
+
+  function frame(now) {
+    // Clamped both ways: a backgrounded tab resumes with a huge gap,
+    // and the first frame's timestamp can trail the play() call that
+    // set the clock.
+    const dt = Math.max(0, Math.min(50, now - lastFrame));
+    lastFrame = now;
+
+    if (closing) {
+      dissolve(now);
+      if (now - closedAt >= OUT_MS) {
+        teardown();
+        return;
+      }
+    } else {
+      const age = now - startedAt;
+      advance(now, age, dt);
+      // Once the paint is down and nothing is in flight the picture is
+      // finished: stop the loop entirely rather than redrawing a static
+      // field until someone clicks. The canvas keeps what it holds.
+      if (!spawning(age) && flying.length === 0) {
+        raf = 0;
+        return;
+      }
+    }
+    raf = requestAnimationFrame(frame);
+  }
+
+  function onKey(e) {
+    if (e.key !== "Escape" && e.key !== "Enter" && e.key !== " ") return;
+    // Capture and swallow: a board column can still hold focus behind
+    // the layer, and Enter there would drop a piece instead of
+    // dismissing.
+    e.preventDefault();
+    e.stopPropagation();
+    userDismiss();
+  }
+
+  function teardown() {
+    cancelAnimationFrame(raf);
+    raf = 0;
+    clearTimeout(closeTimer);
+    closeTimer = null;
+    flying = [];
+    dots = [];
+    centers = [];
+    pending = 0;
+    owed = 0;
+    closing = false;
+    window.removeEventListener("resize", measure);
+    window.removeEventListener("keydown", onKey, true);
+    if (layer) layer.remove();
+  }
+
+  /**
+   * Dismissal the local viewer asked for, as opposed to one arriving
+   * from the other end of the game. Only this path reports back — a
+   * relayed dismissal that echoed would bounce between clients.
+   */
+  function userDismiss() {
+    if (dismiss() && onUserDismiss) onUserDismiss();
+  }
+
+  /** Returns whether there was anything to dismiss. */
+  function dismiss() {
+    if (!layer || !layer.isConnected || closing) return false;
+    closing = true;
+    closedAt = performance.now();
+    // `lit` comes off as `out` goes on: the entrance rules are keyed on
+    // it, and while they match they outrank the exit rules and the
+    // arrival animation would go on holding the emoji in place.
+    layer.classList.remove("lit");
+    layer.classList.add("out");
+
+    // Anything still in flight joins the paint where it currently is,
+    // so the dissolve accounts for every dot on screen.
+    for (const splat of flying) {
+      const splatAge = Math.min(SETTLE_MS, closedAt - splat.born);
+      settle(splat, 1 - Math.exp(-Math.max(0, splatAge) / SETTLE_TAU));
+    }
+    flying.length = 0;
+    if (flyCtx) flyCtx.clearRect(0, 0, w, h);
+
+    if (dots.length === 0) {
+      // Emoji-only ending: nothing to dissolve, just outlast the fade.
+      cancelAnimationFrame(raf);
+      raf = 0;
+      closeTimer = setTimeout(teardown, PLAIN_OUT_MS);
+      return;
+    }
+    if (!raf) {
+      lastFrame = closedAt;
+      raf = requestAnimationFrame(frame);
+    }
+  }
+
+  return {
+    play(spec) {
+      if (layer && layer.isConnected) teardown(); // a new ending supersedes
+      if (!layer) build();
+
+      // Both set before measure(), which sizes the title from its text.
+      titleEl.textContent = spec.title;
+      emojiEl.textContent = spec.emoji;
+      layer.style.setProperty("--dim", String(spec.dim));
+      // `scrim` is what the title reads to know it is over black rather
+      // than over the page, and so which color it has to be.
+      layer.className =
+        "celebration entrance-" + spec.entrance + (spec.dim > 0 ? " scrim" : "");
+      document.body.append(layer);
+      measure();
+      window.addEventListener("resize", measure);
+      window.addEventListener("keydown", onKey, true);
+      // Next frame, so the animation and transitions run from their
+      // start values instead of collapsing into the initial style.
+      requestAnimationFrame(() => {
+        if (layer && layer.isConnected) layer.classList.add("lit");
+      });
+
+      // Reduced motion keeps the emoji (it carries the meaning) and
+      // drops the paint entirely.
+      const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (!spec.splatter || still) return;
+      startedAt = performance.now();
+      lastFrame = startedAt;
+      // Prime the field so the first splats land on the opening frame
+      // rather than a rate-interval later — the paint should start with
+      // the win, not just after it.
+      owed = 3;
+      raf = requestAnimationFrame(frame);
+    },
+
+    /** Idempotent, and safe to call when nothing is playing. */
+    dismiss,
+  };
 }

@@ -478,3 +478,183 @@ button:active {
   display: flex;
   gap: 0.7rem;
 }
+
+/* ---------------- celebration ---------------- */
+
+/* The end-of-round layer: scrim, paint splatters, emoji — in that
+   order, over everything including the theme toggle. It swallows the
+   pointer, because a tap anywhere is what dismisses it. */
+.celebration {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  cursor: pointer;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.celebration-dim {
+  position: absolute;
+  inset: 0;
+  background: oklch(0% 0 0);
+  opacity: 0;
+  transition: opacity 350ms ease;
+}
+.celebration.lit .celebration-dim {
+  opacity: var(--dim, 0);
+}
+
+.celebration-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Positioned on the board's center from script; the transform carries
+   both the centering and the grow, so they can't fight each other. */
+.celebration-emoji {
+  position: absolute;
+  font-size: var(--size, 160px);
+  line-height: 1;
+  transform: translate(-50%, -50%) scale(1);
+  user-select: none;
+  /* keep the system emoji face rather than a monochrome fallback */
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji",
+    sans-serif;
+}
+/* Winning: swells up out of nothing while the paint gathers behind it. */
+.celebration.lit.entrance-grow .celebration-emoji {
+  animation: celebrate-grow 700ms cubic-bezier(0.2, 0.85, 0.3, 1) both;
+}
+@keyframes celebrate-grow {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(var(--from, 0.08));
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+/* Losing: falls in from above the viewport and settles on the board,
+   the same gravity curve and single small bounce as a dropped piece. */
+.celebration.lit.entrance-drop .celebration-emoji {
+  animation: celebrate-fall 640ms cubic-bezier(0.55, 0, 1, 0.45) both;
+}
+@keyframes celebrate-fall {
+  0% {
+    transform: translate(-50%, calc(-50% - var(--drop, 100vh)));
+  }
+  72% {
+    transform: translate(-50%, -50%);
+  }
+  86% {
+    transform: translate(-50%, calc(-50% - var(--bounce, 10px)));
+  }
+  100% {
+    transform: translate(-50%, -50%);
+  }
+}
+
+/* A draw: slams in. Arrives oversized as it fades up, compresses past
+   its resting size on impact, rebounds and settles. */
+.celebration.lit.entrance-slam .celebration-emoji {
+  animation: celebrate-slam 320ms ease-out both;
+}
+@keyframes celebrate-slam {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.3);
+  }
+  28% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(0.88);
+  }
+  62% {
+    transform: translate(-50%, -50%) scale(1.04);
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes celebrate-appear {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* The verdict, over the emoji. Bold 700 is the heaviest Nebula Sans we
+   ship, and the size is set from script — it depends on the board, the
+   room above the emoji, and how long the words are. */
+.celebration-title {
+  position: absolute;
+  font-size: var(--title-size, 3.6rem);
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  color: var(--fg);
+  /* Over the paint there is no scrim, so a halo in the page color
+     keeps the letters legible where a droplet lands on one. */
+  text-shadow: 0 0 20px var(--bg), 0 0 7px var(--bg);
+  transform: translate(-50%, -100%);
+  user-select: none;
+}
+/* Over the scrim, the page's foreground would be invisible in light
+   mode. The shadow matters at the win's lighter 50%, where a pale page
+   only half-darkens and white letters would otherwise sit at roughly
+   2:1 against it; at 85% it costs nothing. */
+.celebration.scrim .celebration-title {
+  color: oklch(98% 0 0);
+  text-shadow: 0 2px 16px oklch(0% 0 0 / 0.6), 0 0 6px oklch(0% 0 0 / 0.45);
+}
+.celebration.lit .celebration-title {
+  animation: celebrate-title 300ms ease both;
+}
+@keyframes celebrate-title {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-100% + 10px));
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -100%);
+  }
+}
+.celebration.out .celebration-title {
+  animation: none;
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+
+/* Out fast, from wherever the grow had got to. */
+.celebration.out .celebration-emoji {
+  animation: none;
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.86);
+  transition: opacity 200ms ease, transform 200ms ease;
+}
+.celebration.out .celebration-dim {
+  opacity: 0;
+  transition-duration: 200ms;
+}
+
+/* Reduced motion: the emoji still appears — it carries the result —
+   but no swelling and nothing falling, and script skips the splatters
+   entirely. Listed per entrance to match the specificity above; a
+   media query adds none of its own. */
+@media (prefers-reduced-motion: reduce) {
+  .celebration.lit.entrance-grow .celebration-emoji,
+  .celebration.lit.entrance-drop .celebration-emoji,
+  .celebration.lit.entrance-slam .celebration-emoji {
+    animation: celebrate-appear 220ms ease both;
+  }
+  .celebration.lit .celebration-title {
+    animation: celebrate-appear 220ms ease both;
+  }
+  .celebration.out .celebration-emoji {
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
