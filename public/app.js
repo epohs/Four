@@ -256,7 +256,14 @@ function main() {
       const scheme = location.protocol === "https:" ? "wss://" : "ws://";
       const socket = new WebSocket(scheme + location.host + "/g/" + entry.code + "/ws");
       entry.socket = socket;
+      // A bad network can leave a socket stuck CONNECTING for a long
+      // time; give up so the close handler schedules the retry.
+      const connectTimeout = setTimeout(() => {
+        if (socket.readyState === WebSocket.CONNECTING) socket.close();
+      }, 10000);
       socket.addEventListener("open", () => {
+        clearTimeout(connectTimeout);
+        entry.backoff = 5000;
         entry.lastAlive = Date.now();
         socket.send(
           JSON.stringify({
@@ -321,7 +328,8 @@ function main() {
             break;
         }
       });
-      socket.addEventListener("close", () => {
+      socket.addEventListener("close", (e) => {
+        clearTimeout(connectTimeout);
         // The ring is derived exclusively from the event log by
         // applyRing() — never set directly by lifecycle events, so a
         // transient disconnect (DO restart, network blip) can't make
@@ -329,6 +337,11 @@ function main() {
         // were offline, the next welcome/log will correct it.
         // Don't resurrect games the user removed from the list.
         if (live.has(entry.code)) {
+          // Exponential backoff so a downed server isn't hammered every
+          // 5s per game; 1013 is the server shedding load ("too many
+          // connections") — come back, but much later.
+          const delay = e.code === 1013 ? 60000 : (entry.backoff ?? 5000);
+          entry.backoff = Math.min((entry.backoff ?? 5000) * 2, 60000);
           setTimeout(() => {
             // Never stack a second socket onto a live one: the retry
             // only fires after this socket closed, but the visibility
@@ -339,7 +352,7 @@ function main() {
             ) {
               connectLanding(entry);
             }
-          }, 5000);
+          }, delay);
         }
       });
     }
@@ -365,6 +378,7 @@ function main() {
         return;
       }
       for (const entry of live.values()) {
+        entry.backoff = 5000; // fresh signal the network may be back; retry promptly
         if (!entry.socket || entry.socket.readyState === WebSocket.CLOSED) connectLanding(entry);
       }
     });
