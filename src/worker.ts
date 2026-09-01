@@ -76,7 +76,9 @@ const EXPIRY_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 const MAX_PLAYER_ID = 64;
 
 // Longest game name, in characters after trimming. Uniqueness suffixes
-// ("Pomme 2") must also fit within this.
+// ("Pomme 2") must also fit within this. Enforced here; the client's
+// rename input caps itself to match, via its own MAX_NAME in
+// public/app.js — change one and change the other.
 const MAX_NAME = 16;
 
 // Log cap: a legitimate game never approaches this (~475 full rounds),

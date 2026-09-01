@@ -89,10 +89,98 @@ function derive(log) {
   return { round, board, over, score, turn, lastMove };
 }
 
+/* ================================================================
+ * Connection layer — the tuning and the two pieces both pages share.
+ * The game page and the landing page's turn-rings open different
+ * sockets for different reasons, but they die the same way and they
+ * resynchronize the same way.
+ * ================================================================ */
+
+// Heartbeat: ping over quiet stretches, and treat a long silence as a
+// dead socket even though it still reads OPEN.
+const HEARTBEAT_MS = 20000;
+const SILENCE_MS = 45000;
+// A socket can sit in CONNECTING for the browser's whole TCP timeout on
+// a bad network; give up sooner so the retry path takes over.
+const CONNECT_TIMEOUT_MS = 10000;
+// Grace on waking, so a stale timestamp from a suspended tab doesn't
+// kill a live socket before its pong has had time to land.
+const WAKE_GRACE_MS = 25000;
+
+// Game-page reconnect. The cap is low because an attempt is one cheap
+// request and iOS doesn't reliably fire `online` — the timer is the
+// recovery path there.
+const RETRY_MIN_MS = 1000;
+const RETRY_MAX_MS = 10000;
+// Turn-ring reconnect. Lower stakes and one socket per in-progress
+// game, so it backs off much further before giving the server another
+// round of attempts.
+const RING_RETRY_MIN_MS = 5000;
+const RING_RETRY_MAX_MS = 60000;
+// Close code 1013 is the server shedding load (its per-game socket
+// cap). Come back, but not soon enough to re-apply the pressure.
+const OVERLOADED_RETRY_MS = 60000;
+
+// An append whose confirmation never lands: ask for the log rather than
+// leaving the board frozen.
+const APPEND_TIMEOUT_MS = 8000;
+// How many games the landing page remembers.
+const RECENT_LIMIT = 10;
+// Row fade before a removed game leaves the list. Must match the
+// transition on #recent-list li in style.css.
+const ROW_FADE_MS = 200;
+// Longest game name. Must match MAX_NAME in src/worker.ts, which is
+// what actually enforces it — this only stops the input accepting
+// characters the server would silently drop.
+const MAX_NAME = 16;
+
+/**
+ * Fold a welcome/log payload into a local event log and return the
+ * result. Delta sync: the server sends only the events past what the
+ * client's hello/resync claimed to hold, and `from` marks that join
+ * point. `from: 0` — an epoch mismatch, or a log reset by expiry —
+ * replaces wholesale. Pure; the caller owns where the log lives, and
+ * the epoch alongside it.
+ */
+function mergeLog(log, msg) {
+  const events = Array.isArray(msg.log) ? msg.log : [];
+  const from = Number.isInteger(msg.from) ? msg.from : 0;
+  return from > 0 && from <= log.length ? log.slice(0, from).concat(events) : events;
+}
+
+/**
+ * Keep sockets honest over quiet stretches. TCP dies silently on flaky
+ * networks — the socket still reads OPEN while frames go nowhere — so
+ * ping periodically, and close anything that has heard nothing for
+ * SILENCE_MS so the caller's normal reconnect path takes over. The
+ * server answers pings from the Durable Object's auto-response, so a
+ * hibernated game is never woken by a keepalive.
+ *
+ * `sockets` is called each tick and yields whatever should be checked
+ * now, as objects carrying the socket and when it last heard anything.
+ * Called rather than captured because both callers replace their
+ * sockets over the life of the page.
+ */
+function startHeartbeat(sockets) {
+  setInterval(() => {
+    for (const { socket, lastAlive } of sockets()) {
+      if (!socket || socket.readyState !== WebSocket.OPEN) continue;
+      if (Date.now() - lastAlive > SILENCE_MS) socket.close();
+      else socket.send("ping");
+    }
+  }, HEARTBEAT_MS);
+}
+
+/** The ws:// or wss:// URL for a game code, derived from `location`. */
+function socketUrl(code) {
+  const scheme = location.protocol === "https:" ? "wss://" : "ws://";
+  return scheme + location.host + "/g/" + code + "/ws";
+}
+
 /* ================================================================ */
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { emptyBoard, dropRow, winFrom, derive, otherSeat };
+  module.exports = { emptyBoard, dropRow, winFrom, derive, otherSeat, mergeLog };
 }
 if (typeof document !== "undefined") main();
 
@@ -253,17 +341,16 @@ function main() {
       // Same rule as the game page: a hidden tab needs no sockets; the
       // visibilitychange handler reconnects when it becomes visible.
       if (document.hidden) return;
-      const scheme = location.protocol === "https:" ? "wss://" : "ws://";
-      const socket = new WebSocket(scheme + location.host + "/g/" + entry.code + "/ws");
+      const socket = new WebSocket(socketUrl(entry.code));
       entry.socket = socket;
       // A bad network can leave a socket stuck CONNECTING for a long
       // time; give up so the close handler schedules the retry.
       const connectTimeout = setTimeout(() => {
         if (socket.readyState === WebSocket.CONNECTING) socket.close();
-      }, 10000);
+      }, CONNECT_TIMEOUT_MS);
       socket.addEventListener("open", () => {
         clearTimeout(connectTimeout);
-        entry.backoff = 5000;
+        entry.backoff = RING_RETRY_MIN_MS;
         entry.lastAlive = Date.now();
         socket.send(
           JSON.stringify({
@@ -288,17 +375,7 @@ function main() {
           case "welcome":
             if (typeof msg.epoch === "string") entry.epoch = msg.epoch;
             if (msg.seat === "red" || msg.seat === "yellow") entry.seat = msg.seat;
-            // Delta sync, same as the game client: when the hello's
-            // have/epoch matched, welcome carries only the suffix.
-            {
-              const events = Array.isArray(msg.log) ? msg.log : [];
-              const from = Number.isInteger(msg.from) ? msg.from : 0;
-              if (from > 0 && from <= entry.log.length) {
-                entry.log = entry.log.slice(0, from).concat(events);
-              } else {
-                entry.log = events;
-              }
-            }
+            entry.log = mergeLog(entry.log, msg);
             applyRing(entry);
             break;
           case "appended":
@@ -317,11 +394,7 @@ function main() {
             break;
           case "log":
             if (typeof msg.epoch === "string") entry.epoch = msg.epoch;
-            if (msg.from > 0 && msg.from <= entry.log.length) {
-              entry.log = entry.log.slice(0, msg.from).concat(msg.log || []);
-            } else {
-              entry.log = Array.isArray(msg.log) ? msg.log : [];
-            }
+            entry.log = mergeLog(entry.log, msg);
             applyRing(entry);
             break;
           default:
@@ -337,11 +410,11 @@ function main() {
         // were offline, the next welcome/log will correct it.
         // Don't resurrect games the user removed from the list.
         if (live.has(entry.code)) {
-          // Exponential backoff so a downed server isn't hammered every
-          // 5s per game; 1013 is the server shedding load ("too many
-          // connections") — come back, but much later.
-          const delay = e.code === 1013 ? 60000 : (entry.backoff ?? 5000);
-          entry.backoff = Math.min((entry.backoff ?? 5000) * 2, 60000);
+          // Exponential backoff, so a downed server isn't hammered once
+          // per in-progress game every few seconds.
+          const backoff = entry.backoff ?? RING_RETRY_MIN_MS;
+          const delay = e.code === 1013 ? OVERLOADED_RETRY_MS : backoff;
+          entry.backoff = Math.min(backoff * 2, RING_RETRY_MAX_MS);
           setTimeout(() => {
             // Never stack a second socket onto a live one: the retry
             // only fires after this socket closed, but the visibility
@@ -357,15 +430,9 @@ function main() {
       });
     }
 
-    // Heartbeat like the game client: keeps sockets alive across idle and
-    // detects dead ones so the retry above takes over.
-    setInterval(() => {
-      for (const entry of live.values()) {
-        if (!entry.socket || entry.socket.readyState !== WebSocket.OPEN) continue;
-        if (Date.now() - entry.lastAlive > 45000) entry.socket.close();
-        else entry.socket.send("ping");
-      }
-    }, 20000);
+    // Entries already carry `socket` and `lastAlive`, so they are what
+    // the shared heartbeat wants to see.
+    startHeartbeat(() => live.values());
 
     // A hidden tab's turn-rings are invisible, so its sockets are not
     // needed: close them, and reconnect everything on return. Mirrors
@@ -378,7 +445,9 @@ function main() {
         return;
       }
       for (const entry of live.values()) {
-        entry.backoff = 5000; // fresh signal the network may be back; retry promptly
+        // A fresh signal the network may be back: retry promptly rather
+        // than inheriting a long delay from earlier trouble.
+        entry.backoff = RING_RETRY_MIN_MS;
         if (!entry.socket || entry.socket.readyState === WebSocket.CLOSED) connectLanding(entry);
       }
     });
@@ -407,7 +476,7 @@ function main() {
         if (updated.length === 0) $("recent").hidden = true;
       };
       if (matchMedia("(prefers-reduced-motion: reduce)").matches) done();
-      else setTimeout(done, 200);
+      else setTimeout(done, ROW_FADE_MS);
     }
   }
 
@@ -461,17 +530,16 @@ function main() {
       // connect (or reconnect) until the tab is visible again — the
       // visibilitychange handler reconnects on return.
       if (document.hidden) return;
-      const scheme = location.protocol === "https:" ? "wss://" : "ws://";
-      const socket = new WebSocket(scheme + location.host + "/g/" + code + "/ws");
+      const socket = new WebSocket(socketUrl(code));
       ws = socket;
       // A bad network can leave a socket stuck CONNECTING for a long
       // time; give up so the close handler schedules the retry.
       const connectTimeout = setTimeout(() => {
         if (socket.readyState === WebSocket.CONNECTING) socket.close();
-      }, 10000);
+      }, CONNECT_TIMEOUT_MS);
       socket.addEventListener("open", () => {
         clearTimeout(connectTimeout);
-        backoff = 1000;
+        backoff = RETRY_MIN_MS;
         lastAlive = Date.now();
         send({ type: "hello", playerId: playerId(), have: log.length, epoch });
       });
@@ -494,43 +562,32 @@ function main() {
         resyncing = false;
         presence = { red: false, yellow: false };
         render();
+        // Jittered, so two clients dropped by the same outage don't
+        // come back in lockstep.
         reconnectTimer = setTimeout(connect, backoff * (0.5 + Math.random()));
-        // Low cap: an attempt is one cheap request, and iOS doesn't
-        // reliably fire `online` — the timer is the recovery path there.
-        backoff = Math.min(backoff * 2, 10000);
+        backoff = Math.min(backoff * 2, RETRY_MAX_MS);
       });
     }
 
-    /*
-     * Heartbeat. TCP dies silently on flaky networks: the socket looks
-     * OPEN while frames go nowhere. Ping over quiet stretches; a long
-     * silence means the connection is dead — close it so the normal
-     * reconnect path takes over. The server answers pings without
-     * waking (auto-response), so idle games still cost nothing.
-     */
-    setInterval(() => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      if (Date.now() - lastAlive > 45000) ws.close();
-      else ws.send("ping");
-    }, 20000);
+    // Read at each tick rather than captured: `ws` is replaced on every
+    // reconnect, and `lastAlive` moves with every frame.
+    startHeartbeat(() => [{ socket: ws, lastAlive }]);
 
     // The instant the network returns or the tab wakes, don't sit out
     // the backoff timer — and probe a socket that may have died while
     // the tab was suspended.
     function reconnectNow() {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        // Grace so a stale timestamp from a suspended tab doesn't kill
-        // a live socket before its pong lands.
-        lastAlive = Math.max(lastAlive, Date.now() - 25000);
+        lastAlive = Math.max(lastAlive, Date.now() - WAKE_GRACE_MS);
         ws.send("ping");
         return;
       }
       if (ws && ws.readyState === WebSocket.CONNECTING) {
-        backoff = 1000; // attempt underway; if it's a stale one, retry fast
+        backoff = RETRY_MIN_MS; // attempt underway; if it's stale, retry fast
         return;
       }
       clearTimeout(reconnectTimer);
-      backoff = 1000;
+      backoff = RETRY_MIN_MS;
       connect();
     }
     // Belt and suspenders: iOS fires these inconsistently (Control
@@ -562,18 +619,10 @@ function main() {
       send({ type: "resync", have: log.length, epoch });
     }
 
-    /*
-     * Apply a welcome/log payload. Delta sync: the server sends only
-     * the events past what our hello/resync claimed to have (`from` is
-     * the join point); from: 0 — epoch mismatch, old server, or a log
-     * reset by expiry — replaces wholesale.
-     */
+    /** Apply a welcome/log payload, epoch included. See mergeLog(). */
     function applyLog(msg) {
-      const events = Array.isArray(msg.log) ? msg.log : [];
-      const from = Number.isInteger(msg.from) ? msg.from : 0;
       if (typeof msg.epoch === "string") epoch = msg.epoch;
-      if (from > 0 && from <= log.length) log = log.slice(0, from).concat(events);
-      else log = events;
+      log = mergeLog(log, msg);
     }
 
     function handle(msg) {
@@ -657,7 +706,7 @@ function main() {
         done: !!state.over, // current round finished — unfinished games get flagged
         last: Date.now(),
       });
-      store.set("four:recent", recent.slice(0, 10));
+      store.set("four:recent", recent.slice(0, RECENT_LIMIT));
     }
 
     function tryAppend(event) {
@@ -669,7 +718,7 @@ function main() {
       const stamp = ++pendingStamp;
       setTimeout(() => {
         if (pending && pendingStamp === stamp) requestResync();
-      }, 8000);
+      }, APPEND_TIMEOUT_MS);
       render(); // drop ghost/cursor affordances while in flight
     }
 
@@ -748,7 +797,7 @@ function main() {
       const input = el("input", "name-input");
       input.value = gameName || "";
       input.placeholder = code;
-      input.maxLength = 16;
+      input.maxLength = MAX_NAME;
       input.addEventListener("keydown", (e) => {
         if (e.key === "Enter") input.blur();
         if (e.key === "Escape") {
@@ -924,10 +973,15 @@ function main() {
 /* ================================================================
  * Celebration — the end-of-round moment.
  *
- * One full-viewport layer: a dimmer, a canvas of paint splatters, and
- * an emoji centered on the board. The game code only picks a spec and
- * says "play"; the layer owns its DOM, its animation loop, and its
- * teardown, and hands nothing back.
+ * One full-viewport layer, back to front: a black scrim, a canvas of
+ * settled paint, a canvas of paint still in flight, the verdict, and
+ * an emoji centered on the board.
+ *
+ * The game code picks a spec and says "play". Everything else — the
+ * DOM, the animation loop, the sizing, the teardown — lives in here.
+ * The one thing that comes back out is `onUserDismiss`, called when
+ * this viewer clears the layer themselves, so the caller can tell the
+ * rest of the game about it.
  *
  * The splatter effect is our own canvas implementation, inspired by
  * confetti.ts by LoaderB0T (MIT) — https://github.com/LoaderB0T/confetti.ts
@@ -1027,8 +1081,10 @@ function createCelebration(boardEl, onUserDismiss) {
   let flyCtx = null;
 
   let flying = []; // splats mid-expansion
-  let pending = 0; // dots owed to `dots` by the splats still flying
-  let dots = []; // every dot placed: { x, y, r, ci, d }
+  let pendingDots = 0; // dots the splats still flying will add to `dots`
+  // Every droplet laid down: an ellipse { x, y, rx, ry, rot }, a palette
+  // index `ci`, and `d`, its place in the dissolve queue.
+  let dots = [];
   let centers = []; // splat centers so far, for spacing the next one
   let buckets = []; // reused dissolve draw buckets: [alphaStep][colorIndex]
 
@@ -1249,7 +1305,7 @@ function createCelebration(boardEl, onUserDismiss) {
         rot: angle + (Math.random() - 0.5) * 0.7,
       });
     }
-    pending += count;
+    pendingDots += count;
     // Born on the frame's clock, not performance.now(): the frame
     // timestamp trails the real one, and a splat born "in the future"
     // reads as a negative age and briefly implodes instead of bursting.
@@ -1263,7 +1319,7 @@ function createCelebration(boardEl, onUserDismiss) {
    * 100ms old snaps to full size on the way out.
    */
   function settle(splat, spread) {
-    pending -= splat.count;
+    pendingDots -= splat.count;
     for (const group of splat.groups) {
       paintCtx.fillStyle = PALETTE[group.ci];
       paintCtx.beginPath();
@@ -1280,7 +1336,7 @@ function createCelebration(boardEl, onUserDismiss) {
   }
 
   function spawning(age) {
-    return age < SPAWN_MS && dots.length + pending < maxDots;
+    return age < SPAWN_MS && dots.length + pendingDots < maxDots;
   }
 
   function advance(now, age, dt) {
@@ -1391,7 +1447,7 @@ function createCelebration(boardEl, onUserDismiss) {
     flying = [];
     dots = [];
     centers = [];
-    pending = 0;
+    pendingDots = 0;
     owed = 0;
     closing = false;
     window.removeEventListener("resize", measure);
@@ -1433,12 +1489,13 @@ function createCelebration(boardEl, onUserDismiss) {
       cancelAnimationFrame(raf);
       raf = 0;
       closeTimer = setTimeout(teardown, PLAIN_OUT_MS);
-      return;
+      return true;
     }
     if (!raf) {
       lastFrame = closedAt;
       raf = requestAnimationFrame(frame);
     }
+    return true;
   }
 
   return {

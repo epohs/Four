@@ -481,9 +481,11 @@ button:active {
 
 /* ---------------- celebration ---------------- */
 
-/* The end-of-round layer: scrim, paint splatters, emoji — in that
-   order, over everything including the theme toggle. It swallows the
-   pointer, because a tap anywhere is what dismisses it. */
+/* The end-of-round layer, back to front: the scrim, settled paint, paint
+   still in flight, the verdict, the emoji — over everything including
+   the theme toggle. It swallows the pointer, because a tap anywhere is
+   what dismisses it. Sizes and positions come from createCelebration()
+   in app.js, which is also where the timings not listed here live. */
 .celebration {
   position: fixed;
   inset: 0;
@@ -595,9 +597,11 @@ button:active {
   line-height: 1.05;
   letter-spacing: 0.01em;
   white-space: nowrap;
+  /* Unscrimmed: the page's own foreground, haloed in the page color so
+     a droplet landing on a letter can't eat it. Every outcome currently
+     sets a scrim, so the rule below always wins — this is the fallback
+     kept for an outcome with `dim: 0`, which the spec still allows. */
   color: var(--fg);
-  /* Over the paint there is no scrim, so a halo in the page color
-     keeps the letters legible where a droplet lands on one. */
   text-shadow: 0 0 20px var(--bg), 0 0 7px var(--bg);
   transform: translate(-50%, -100%);
   user-select: none;
