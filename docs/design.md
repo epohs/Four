@@ -10,7 +10,8 @@ Truly minimal:
 
 - Wordmark ("Four") and a one-line description.
 - A single **New game** action → generates a code client-side, navigates to `/g/<code>`.
-- A **Recent games** list from localStorage (code, your seat color, last-played date), only shown when non-empty. Each entry links back into its game.
+- A **Recent games** list from localStorage, shown only when non-empty and capped at the ten most recent. Each row carries a chip in the seat you hold there (neutral if you only watched), the game's **name** — or its code, until someone names it — an "in progress" badge while the current round is unfinished, and the date you last played. The row links back into the game; a **×** removes it, fading out first so the list doesn't jump.
+- **Turn rings.** An unfinished game where you hold a seat gets a ring on its chip when it's your move, kept live by a light socket per such game so it reacts the moment your opponent plays. These sockets never count toward presence — watching a ring is not being at the game. See [architecture.md](architecture.md).
 
 No hero images, no marketing, no footer clutter.
 
@@ -18,15 +19,17 @@ No hero images, no marketing, no footer clutter.
 
 One screen, no scrolling on any target device:
 
+- The wordmark on its own line at the top, linking home.
+- The game's **name** beside the score — the code until it has one. Only the creator (red) gets it as a button; clicking swaps it for an inline input capped at the same 16 characters the server enforces, committed on Enter or blur, abandoned on Escape. What comes back may be a numbered variant of what was typed (names are unique — see [architecture.md](architecture.md)), and the HUD shows what was actually granted, so the namer can see what happened.
 - The 7×6 board, the centerpiece.
 - A status line: whose turn / who won / draw — with a dot in the turn player's color.
 - Presence means being at the game: hiding the tab (switching tabs/apps, minimizing) closes the socket and marks you away until you return — the same signal as clicking Leave.
 - Score for the link's lifetime (red n — yellow n).
 - A **Rematch** action, visible only when the round is over.
-- A **Share** affordance (copy link) so inviting the second player is one tap.
+- A **Share** affordance (copy link) so inviting the second player is one tap, and a **Leave** action back to the landing page.
 - Theme toggle, small and out of the way.
 
-Spectators see the same screen minus move affordances.
+Spectators see the same screen minus move affordances, and never get the rename button.
 
 ## Board
 
@@ -55,7 +58,7 @@ Restrained during play, with one deliberate exception when a round ends. Animati
 - **Win:** the four winning cells get a quiet highlight, then the celebration below.
 - **Presence pulse:** the scoreboard chips pulse while the corresponding player is connected — liveness at a glance.
 - Theme switches and presence changes transition briefly or not at all.
-- Respect `prefers-reduced-motion`: with it set, pieces appear in place without the drop, and the celebration keeps only its emoji (fading in place, no paint, no growth).
+- Respect `prefers-reduced-motion`: with it set, pieces appear in place without the drop, and the celebration keeps its verdict and emoji — both fading in place, with no growth, no fall and no paint.
 
 Nothing else moves.
 
